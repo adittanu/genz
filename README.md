@@ -11,7 +11,7 @@
 - **Settled shelf.** Hover a finished agent and press the circle-check to put it away. It leaves the list and waits on a slim shelf at the bottom of the sidebar.
 - **Auto-settle after 3 idle days.** Agents that have been idle for 3 days (the default) settle themselves. Click the `auto 3d` pill on the shelf header to step through 1d, 3d, 7d, 14d or off.
 - **Comes back by itself.** A settled agent returns to the list when it starts working or needs you again, or when it finishes a new turn. Looking at it doesn't bring it back.
-- **Honest idle time.** Idle ages come from the core's own `status_ms`, so an agent that has been idle for a week shows `7d` even if the layout was installed today.
+- **Park: free the memory, keep the place.** A settled agent keeps running and keeps its memory. Press the archive icon on its shelf row (or let `park 7d` do it) and the agent is closed but stays on the shelf, dimmed. Click it to start it again with the agent's own resume command, in its old space and folder. Works for Claude, Kiro, OpenCode, CodeBuddy and Codex. Idle ages come from the core's own `status_ms`, so an agent that has been idle for a week shows `7d` even if the layout was installed today.
 - **No scrollbars in the sidebar.** Spaces and Agents still scroll with the wheel, they just don't draw a bar.
 - **Agents as cards.** Program icon with a state badge (spinner, dot), title, project and branch, time since the last change. Sections: Needs you, Done, Working (docked tray), Idle. Pin, settle and close sit on the card's hover.
 - **Spaces with worktrees.** Colored avatars, repo and branch tails (`↑2 ↓1`), worktrees nested under their repo, machine groups when you use ssh machines.
@@ -89,9 +89,9 @@ Switch back any time with `ctrl-shift-l`. Remove it by deleting `layouts/genz.js
 | Click the shelf header | Fold or open the shelf (folded at first). |
 | Hover a settled row, press the undo arrow | Back in the list, idle clock restarted. |
 | Click `auto 3d` | Cycle the auto-settle time: 1d, 3d, 7d, 14d, off. |
-| Pin an agent | Pinned agents are never settled. |
+| Hover a settled row, press the archive icon | **Park** it: the agent is closed (memory freed) and stays on the shelf, dimmed. |
 
-The state lives on the agent's terminal as a label (`settled=<ms>:<turn>`), so it survives restarts of the window, ends with the terminal, and every Herdr client sees the same shelf. The auto-settle time is the shared key `agents.settleDays` (`0` = off). The code is in `mods/genz-agents/main.js` (look for `// genz:`).
+Parked agents are stored in the mod's localStorage (`parked`): title, agent, folder, space, time. Resume runs `claude --continue`, `kiro-cli chat --resume`, `opencode --continue`, `codebuddy --continue` or `codex resume --last`. When other agents (running or parked) share the same folder, "the latest session" could be someone else's, so it opens the agent's own picker instead (`claude --resume`, `kiro-cli chat --resume-picker`, `codebuddy --resume`, `codex resume`). Herdr does not expose session ids, so that is the best a layout can do. Agents on other machines and agents without a known resume command can't be parked. (`settled=<ms>:<turn>`), so it survives restarts of the window, ends with the terminal, and every Herdr client sees the same shelf. The auto-settle time is the shared key `agents.settleDays` (`0` = off). The code is in `mods/genz-agents/main.js` (look for `// genz:`).
 
 ## Good to know before you install
 

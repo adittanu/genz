@@ -4,7 +4,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import * as fs from "fs/promises";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, closeOverlay, openOverlay, props, appHome, exec, home, readTextFile, watchFolder, window, layout, hc, notify } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, closeOverlay, openOverlay, props, appHome, exec, home, readTextFile, watchFolder, window, layout, hc, notify, knownAgents } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -83,6 +83,22 @@ const settleDays = () => { const d = shared("agents.settleDays"); return Number.
 const BUSY = new Set(["working", "blocked"]);
 const SETTLED_FIRST = 10;
 const SETTLED_MAX_H = 230;
+
+// genz: Parked. A settled agent can be taken out of memory and still wait on the shelf: its pane is closed (the terminal
+// ends) and a record in localStorage "parked" says how to start it again. Per agent: `cont` resumes the latest session of
+// that folder, `pick` opens the agent's own session picker (used when other agents share the folder, where "the latest"
+// could be someone else's). Agents not listed here can't be parked. Remote agents can't either.
+const RESUME = [
+  { re: /claude/i, exe: "claude", cont: ["--continue"], pick: ["--resume"] },
+  { re: /kiro/i, exe: "kiro-cli", cont: ["chat", "--resume"], pick: ["chat", "--resume-picker"] },
+  { re: /opencode/i, exe: "opencode", cont: ["--continue"], pick: ["--continue"] },
+  { re: /codebuddy/i, exe: "codebuddy", cont: ["--continue"], pick: ["--resume"] },
+  { re: /codex/i, exe: "codex", cont: ["resume", "--last"], pick: ["resume"] },
+];
+const specOf = (x) => RESUME.find((r) => r.re.test(`${x.app ?? ""} ${x.key ?? x.program?.key ?? ""} ${x.name ?? x.program?.name ?? ""}`));
+const PARK_CHOICES = [0, 7, 14, 30];
+const parkDays = () => { const d = shared("agents.parkDays"); return Number.isFinite(d) && d >= 0 ? d : 0; };
+const sameDir = (a, b) => Boolean(a && b) && a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
 // personal: Claude's own sub-agents (Agent tool), from the files projects/hooks/subagents.sh keeps per terminal.
 const SUBS = () => `${appHome()}/data/projects/subagents`;
 
@@ -122,6 +138,8 @@ export default class Agents extends View {
     this.pins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     this.revived = JSON.parse(localStorage.getItem("revived") ?? "{}");
     this.core = {};
+    // genz: parked agents: [{id, title, app, key, name, icon, tint, cwd, space, spaceName, at}], newest first.
+    this.parked = JSON.parse(localStorage.getItem("parked") ?? "[]");
     // genz: Settled. Put-away agents carry `settled=<ms>:<turn>` as a label on their terminal (see setSettled).
     // pending: labels written but not back from the core yet (address -> value, "" = removed).
     this.pending = {};
@@ -340,6 +358,57 @@ export default class Agents extends View {
     localStorage.setItem("revived", JSON.stringify(this.revived));
   }
 
+  // Closes the agent's pane (which ends its terminal), or its space when it's the only pane there.
+  closeAgent(a) {
+    const all = spaces();
+    const n = all.find((x) => x.id === a.space)?.tabs.reduce((k, tb) => k + tb.panes, 0) ?? 2;
+    // Closing the last space would quit the app: leave a shell tab there instead.
+    if (n <= 1 && all.length <= 1) run("tab.new", { space: a.space });
+    if (n <= 1 && all.length > 1) run("space.close", { id: a.space, confirmed: true });
+    else run("pane.close", { pane: a.pane });
+  }
+
+  saveParked() {
+    localStorage.setItem("parked", JSON.stringify(this.parked));
+  }
+
+  // genz: Park. Writes down how to start the agent again, then closes its pane. False when it can't be resumed (an
+  // agent we have no resume command for, one on another machine, or no folder known).
+  park(a, title) {
+    if (!specOf(a) || a.address.includes("/")) return false;
+    const cwd = panes().find((p) => p.pane === a.pane)?.cwd || spaces().find((s) => s.id === a.space)?.folder;
+    if (!cwd) return false;
+    this.parked = [{
+      id: `${a.address}-${Date.now()}`, title: title || clean(a.title) || a.tab_name || a.program?.name || a.address,
+      app: a.app, key: a.program?.key, name: a.program?.name, icon: a.program?.icon, tint: a.program?.tint,
+      cwd, space: a.space, spaceName: a.space_name, at: Date.now(),
+    }, ...this.parked];
+    this.saveParked();
+    this.closeAgent(a);
+    return true;
+  }
+
+  // genz: Resume. A new tab in the agent's old space (else a new space in its folder) running its resume command.
+  async resume(e) {
+    const spec = specOf(e);
+    if (!spec) return notify({ title: "Can't resume", body: `No resume command for ${e.name ?? "this agent"}.`, level: "error" });
+    const known = await knownAgents().catch(() => []);
+    const exe = known.find((k) => k.key === e.key)?.run?.[0] ?? spec.exe;
+    // Other agents (running or parked) in that folder: use the agent's own picker, "the latest" could be one of them.
+    const others = panes().filter((p) => p.terminal && p.program?.agent && sameDir(p.cwd, e.cwd)).length
+      + this.parked.filter((x) => x.id !== e.id && sameDir(x.cwd, e.cwd)).length;
+    const argv = [exe, ...(others > 0 ? spec.pick : spec.cont)];
+    const sp = spaces().find((s) => s.id === e.space);
+    if (sp) { run("tab.new", { space: sp.id, folder: e.cwd, name: e.title, argv }); run("space.select", { id: sp.id }); }
+    else run("space.new", { folder: e.cwd, tab: e.title, argv });
+    this.forget(e);
+  }
+
+  forget(e) {
+    this.parked = this.parked.filter((x) => x.id !== e.id);
+    this.saveParked();
+  }
+
   // The agent, or anything under it, is working or needs the person.
   busy(a, all, listed) {
     return BUSY.has(a.status) || this.tree(all, a.address).some((s) => BUSY.has(kidStatus(s.t, listed)));
@@ -363,17 +432,22 @@ export default class Agents extends View {
     cx.spawn(async (cx) => {
       await this.coreStamps(agents());
       cx.notify();
-      const days = settleDays();
-      if (!days) return;
+      const days = settleDays(), park = parkDays();
+      if (!days && !park) return;
       const list = agents(), terms = terminals(), now = Date.now();
       const listed = new Map(list.map((a) => [a.address, a.status]));
       const all = [...terms, ...this.claudeKids(list, terms)];
       const term = new Map(terms.map((k) => [k.address, k]));
       for (const a of list) {
-        if (a.status !== "idle" || a.focused || this.pins.includes(a.address) || this.settledAt(a, term)) continue;
+        if (!days || a.status !== "idle" || a.focused || this.pins.includes(a.address) || this.settledAt(a, term)) continue;
         if (this.busy(a, all, listed)) continue;
         const at = this.since(a);
         if (at && now - at >= days * 86400000) this.settle(a, term, cx);
+      }
+      // genz: settled for parkDays() days (default off): taken out of memory, kept on the shelf to resume.
+      for (const a of list) {
+        const s = park && a.status === "idle" && !a.focused && !this.pins.includes(a.address) ? this.settledAt(a, term) : null;
+        if (s && now - s[0] >= park * 86400000 && !this.busy(a, all, listed)) this.park(a);
       }
       cx.notify();
     });
@@ -817,7 +891,7 @@ export default class Agents extends View {
     this.lookup(cx);
 
     // genz: the Settled shelf, docked under the lists: a header (fold, count, the auto-settle pill) and slim rows, newest first.
-    const days = settleDays();
+    const days = settleDays(), park = parkDays();
     const slim = (a) => {
       const hov = this.hovered === a.address;
       const pic = icon(a.program, 14, t.muted);
@@ -825,6 +899,11 @@ export default class Agents extends View {
         .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Bring back")
         .on_click((_e, cx) => { cx.stop_propagation(); this.unsettle(a, cx); this.hovered = null; cx.notify(); })
         .child(svg("mods/genz-agents/undo.svg").size(14));
+      // genz: Park: close the agent's terminal (frees its memory) but keep it on the shelf to resume later.
+      const parkBtn = div().id(`park-${a.address}`).size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Park: close it, resume later")
+        .on_click((_e, cx) => { cx.stop_propagation(); this.park(a, headOf(a)); this.hovered = null; cx.notify(); })
+        .child(svg("mods/workspace-chrome/archive.svg").size(14));
       return h_flex().id(`st-${a.address}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer()
         .when(a.focused, (el) => el.bg(t.selected))
         .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
@@ -839,13 +918,41 @@ export default class Agents extends View {
           .child(pic ?? svg("mods/genz-agents/bot.svg").size(14).flex_none().text_color(t.dim)))
         .child(div().id(`stt-${a.address}`).flex_1().min_w(0).truncate().text_size(12.5)
           .text_color(a.focused ? t.foreground : t.muted).tooltip(headOf(a)).child(headOf(a)))
-        .when(hov, (el) => el.child(undo).child(closer(a)))
+        .when(hov, (el) => el.child(undo).when(Boolean(specOf(a)) && !a.address.includes("/"), (e) => e.child(parkBtn)).child(closer(a)))
         .when(!hov, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - this.settledAt(a, term)[0]))));
     };
+    // genz: a parked agent: dim row, click resumes it in a new tab; hover offers Resume and Forget.
+    const pslim = (e) => {
+      const hov = this.hovered === e.id;
+      const pic = e.icon
+        ? (e.tint ? svg(e.icon).size(14).flex_none().text_color(t.dim) : image(e.icon).w(14).h(14).flex_none())
+        : svg("mods/genz-agents/bot.svg").size(14).flex_none().text_color(t.dim);
+      const btn = (id, src, tip, danger, action) => div().id(`${id}-${e.id}`).size(24).flex_none().flex().items_center().justify_center().rounded(6)
+        .text_color(t.dim).cursor_pointer()
+        .hover((s) => s.bg(danger ? t.blocked + "26" : t.hover).text_color(danger ? t.blocked : t.foreground)).tooltip(tip)
+        .on_click((_e, cx) => { cx.stop_propagation(); action(); this.hovered = null; cx.notify(); })
+        .child(svg(src).size(14));
+      return h_flex().id(`pk-${e.id}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer().opacity(0.75)
+        .hover((s) => s.bg(t.hover))
+        .on_hover((on, cx) => {
+          if (on) this.hovered = e.id;
+          else if (this.hovered === e.id) this.hovered = null;
+          cx.notify();
+        })
+        .on_click(() => this.resume(e))
+        .child(h_flex().w(16).flex_none().items_center().justify_center().child(pic))
+        .child(div().id(`pkt-${e.id}`).flex_1().min_w(0).truncate().text_size(12.5).text_color(t.muted)
+          .tooltip(`${e.title}\nParked, not running. ${e.cwd}\nClick to resume.`).child(e.title))
+        .when(hov, (el) => el.child(btn("resume", "mods/genz-agents/play.svg", "Resume", false, () => this.resume(e)))
+          .child(btn("forget", "mods/workspace-chrome/x.svg", "Forget (the session itself is not touched)", true, () => this.forget(e))))
+        .when(!hov, (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11).text_color(t.dim)
+          .child(svg("mods/workspace-chrome/archive.svg").size(11)).child(duration(now - e.at))));
+    };
+    // Settled agents first, then parked ones.
+    const items = [...settled.map((a) => ({ a })), ...this.parked.map((e) => ({ e }))];
     const shelf = () => {
       const open = this.settledOpen;
-      const shownRows = this.settledMore ? settled : settled.slice(0, SETTLED_FIRST);
-      const header = h_flex().id("settled-header").h(32).px(10).gap(7).flex_none().items_center().text_size(11.5).font_semibold().cursor_pointer()
+      const shownRows = (this.settledMore ? items : items.slice(0, SETTLED_FIRST)).map((it) => (it.a ? slim(it.a) : pslim(it.e)));      const header = h_flex().id("settled-header").h(32).px(10).gap(7).flex_none().items_center().text_size(11.5).font_semibold().cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => {
           this.settledOpen = !this.settledOpen;
@@ -855,8 +962,17 @@ export default class Agents extends View {
         .child(svg("mods/workspace-chrome/circle-check.svg").size(12).flex_none().text_color(t.dim))
         .child(div().text_color(t.muted).child("Settled"))
         .child(div().flex_none().px(6).h(16).rounded(8).bg(t.hover).flex().items_center()
-          .text_size(10.5).font_medium().text_color(t.dim).child(String(settled.length)))
+          .text_size(10.5).font_medium().text_color(t.dim).child(String(settled.length + this.parked.length)))
         .child(div().flex_1())
+        .child(div().id("park-days").flex_none().px(6).h(16).rounded(8).flex().items_center().text_size(10.5).font_medium()
+          .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(park ? `Settled agents are closed after ${park} days and kept here to resume. Click to change.` : "Settled agents stay running. Click to have them parked (closed, resumable) after some days.")
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            setShared("agents.parkDays", PARK_CHOICES[(PARK_CHOICES.indexOf(park) + 1) % PARK_CHOICES.length]);
+            cx.notify();
+          })
+          .child(park ? `park ${park}d` : "park off"))
         .child(div().id("settle-days").flex_none().px(6).h(16).rounded(8).flex().items_center().text_size(10.5).font_medium()
           .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .tooltip(days ? `Settles agents idle for ${days} day${days > 1 ? "s" : ""}. Click to change.` : "Auto-settle is off. Click to change.")
@@ -870,13 +986,13 @@ export default class Agents extends View {
       const more = h_flex().id("settled-more").px(8).h(24).flex_none().items_center().text_size(11.5).text_color(t.dim).cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => { this.settledMore = !this.settledMore; cx.notify(); })
-        .child(this.settledMore ? "Show less" : `${settled.length - SETTLED_FIRST} more`);
+        .child(this.settledMore ? "Show less" : `${items.length - SETTLED_FIRST} more`);
       return v_flex().id("ag-settled").flex_none().px(8).border_t(1).border_color(t.border)
         .child(header)
-        .when(open && settled.length === 0, (el) => el.child(div().px(10).pb(10).text_size(11.5).text_color(t.dim)
+        .when(open && items.length === 0, (el) => el.child(div().px(10).pb(10).text_size(11.5).text_color(t.dim)
           .child(days ? `Nothing yet. Agents idle for ${days}d land here.` : "Nothing yet. Settle an agent from its card.")))
-        .when(open && settled.length > 0, (el) => el.child(v_flex().id("ag-settled-rows").gap(1).pb(6).max_h(SETTLED_MAX_H).overflow_y_scroll()
-          .children([...shownRows.map(slim), ...(settled.length > SETTLED_FIRST ? [more] : [])])));
+        .when(open && items.length > 0, (el) => el.child(v_flex().id("ag-settled-rows").gap(1).pb(6).max_h(SETTLED_MAX_H).overflow_y_scroll()
+          .children([...shownRows, ...(items.length > SETTLED_FIRST ? [more] : [])])));
     };
 
     return v_flex()
