@@ -581,11 +581,14 @@ export default class Agents extends View {
     const closer = (a) => div()
       .id(`close-${a.address}`)
       .flex_none()
-      .p(2)
-      .rounded(4)
+      .size(24)
+      .flex()
+      .items_center()
+      .justify_center()
+      .rounded(6)
       .text_color(t.dim)
       .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.blocked))
+      .hover((s) => s.bg(t.blocked + "26").text_color(t.blocked))
       .tooltip("Close agent")
       .on_click((_e, cx) => {
         cx.stop_propagation();
@@ -598,13 +601,16 @@ export default class Agents extends View {
         this.hovered = null;
         cx.notify();
       })
-      .child(svg("mods/workspace-chrome/x.svg").size(13));
+      .child(svg("mods/workspace-chrome/x.svg").size(14));
     // genz: put a finished agent away on the Settled shelf.
     const settler = (a) => div()
       .id(`settle-${a.address}`)
       .flex_none()
-      .p(2)
-      .rounded(4)
+      .size(24)
+      .flex()
+      .items_center()
+      .justify_center()
+      .rounded(6)
       .text_color(t.dim)
       .cursor_pointer()
       .hover((s) => s.bg(t.hover).text_color(t.done))
@@ -615,7 +621,7 @@ export default class Agents extends View {
         this.hovered = null;
         cx.notify();
       })
-      .child(svg("mods/workspace-chrome/circle-check.svg").size(13));
+      .child(svg("mods/workspace-chrome/circle-check.svg").size(14));
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
       // An agent on another machine (`vps/t7`) says which.
@@ -639,8 +645,11 @@ export default class Agents extends View {
       const pin = div()
         .id(`pin-${a.address}`)
         .flex_none()
-        .p(2)
-        .rounded(4)
+        .size(24)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(6)
         .text_color(t.dim)
         .cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -652,7 +661,7 @@ export default class Agents extends View {
           this.hovered = null;
           cx.notify();
         })
-        .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
+        .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(14));
       // personal: idle agents close from the row: their pane, or their space when it's the only pane there.
       const close = closer(a);
       // personal: a card. Left: the agent's icon with its state as a badge on the corner. Right: the session title
@@ -676,7 +685,7 @@ export default class Agents extends View {
       const ends = (el) => el
         .when(hovered, (e) => e.child(pin))
         .when(hovered && !isPinned && !this.busy(a, all, this.listed), (e) => e.child(settler(a)))
-        .when(hovered && rankOf(a) === RANK.idle, (e) => e.child(close))
+        .when(hovered && rankOf(a) === RANK.idle, (e) => e.child(div().w(1).h(14).mx(5).flex_none().bg(t.border)).child(close))
         .child(stamp());
       const cut = a.focused ? t.selected : t.chrome;
       const badge = st === "working"
@@ -697,7 +706,7 @@ export default class Agents extends View {
         .when(Boolean(machine), (el) => el.child(this.remote(t, a, machine)))
         .when(Boolean(w?.branch) && !underHeader, (el) => el.child(div().flex_none().text_color(t.dim).child("Â·")))
         .when(Boolean(w?.branch), (el) => el.child(this.branchLine(t, w).flex_1().min_w(0)));
-      const titleLine = h_flex().h(20).gap(6).items_center()
+      const titleLine = h_flex().h(24).gap(6).items_center()
         .child(div().id(`tt-${a.address}`).flex_1().min_w(0).truncate().text_size(13.5)
           .when(a.focused, (el) => el.font_semibold())
           .text_color(idle ? t.muted : t.foreground).tooltip(head).child(head))
@@ -812,10 +821,10 @@ export default class Agents extends View {
     const slim = (a) => {
       const hov = this.hovered === a.address;
       const pic = icon(a.program, 14, t.muted);
-      const undo = div().id(`unsettle-${a.address}`).flex_none().p(2).rounded(4).text_color(t.dim).cursor_pointer()
+      const undo = div().id(`unsettle-${a.address}`).size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Bring back")
         .on_click((_e, cx) => { cx.stop_propagation(); this.unsettle(a, cx); this.hovered = null; cx.notify(); })
-        .child(svg("mods/genz-agents/undo.svg").size(13));
+        .child(svg("mods/genz-agents/undo.svg").size(14));
       return h_flex().id(`st-${a.address}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer()
         .when(a.focused, (el) => el.bg(t.selected))
         .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
