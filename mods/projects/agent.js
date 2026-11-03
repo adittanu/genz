@@ -1,6 +1,7 @@
 // New-agent helpers: the Claude program to run, temp branch names, Haiku's name for a prompt, tab titles.
-import { appHome, exec, home, knownAgents, notify, readTextFile, writeTextFile } from "herdr";
+import { appHome, exec, home, knownAgents, notify, readTextFile, window, writeTextFile } from "herdr";
 import { bases, clean, dir, expand, load, namingOf, prefixOf, worktreePath } from "./lib.js";
+import { mkdirp, present } from "./os.js";
 
 // data/projects/naming-prompt.txt, else this mod's; hooks/rename-branch.sh reads the same.
 async function SYS() {
@@ -34,11 +35,11 @@ export async function claudeArgs(on = null) {
   if (on) return [];
   hook ??= (async () => {
     const hooks = `${appHome()}/mods/projects/hooks`, script = `${hooks}/rename-branch.sh`, subs = `${hooks}/subagents.sh`;
-    if ((await exec("test", ["-f", script])).code !== 0) throw new Error(`${script} is missing.`);
+    if (!(await present(script))) throw new Error(`${script} is missing.`);
     const path = `${dir()}/claude-settings.json`;
-    await exec("mkdir", ["-p", dir()]);
+    await mkdirp(dir());
     const cmd = (s, matcher) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `bash ${q(s)} ${q(dir())}`, timeout: 5 }] }];
-    const sub = (await exec("test", ["-f", subs])).code === 0
+    const sub = (await present(subs))
       ? { SessionStart: cmd(subs, "startup|resume"), SubagentStart: cmd(subs), SubagentStop: cmd(subs), Stop: cmd(subs) }
       : {};
     const text = JSON.stringify({ hooks: { UserPromptSubmit: cmd(script), ...sub } }, null, 2) + "\n";
@@ -74,8 +75,12 @@ const LIMIT = 's=$1; shift; t=$(command -v timeout || command -v gtimeout) && ex
 async function suggest(prompt, { model = "haiku", timeout = 20 } = {}) {
   const t0 = Date.now();
   try {
-    const r = await exec("sh", ["-c", LIMIT, "sh", String(timeout), "claude", "-p", ask(prompt), "--system-prompt", await SYS(), "--model", model,
-      "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--tools", ""], { cwd: home() });
+    const args = ["-p", ask(prompt), "--system-prompt", await SYS(), "--model", model,
+      "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--tools", ""];
+    // genz: Windows has no sh/timeout: claude runs directly there (exec's own limit applies).
+    const r = window()?.platform === "windows"
+      ? await exec("claude", args, { cwd: home() })
+      : await exec("sh", ["-c", LIMIT, "sh", String(timeout), "claude", ...args], { cwd: home() });
     const ms = Date.now() - t0;
     if (r.code !== 0) return { error: r.code === 124 ? `timed out after ${timeout} s` : (r.stderr || r.stdout).trim().split("\n").pop() || `claude exited ${r.code}`, ms };
     const line = r.stdout.trim().split("\n").map((l) => l.replace(/[`"'*]/g, "").trim()).find(Boolean) ?? "";
@@ -92,7 +97,7 @@ async function unique(project, name) {
   if (ok?.code !== 0) throw new Error(`"${name}" isn't a valid branch name.`);
   const b = await bases(project);
   const taken = async (n) => b.locals.has(n) || b.trees.has(worktreePath(b.root, n))
-    || (await exec("test", ["-e", worktreePath(b.root, n)], { on }).catch(() => ({ code: 1 }))).code === 0;
+    || (on ? (await exec("test", ["-e", worktreePath(b.root, n)], { on }).catch(() => ({ code: 1 }))).code === 0 : await present(worktreePath(b.root, n)).catch(() => false));
   let n = name;
   for (let i = 2; await taken(n); i++) n = `${name.slice(0, 63 - String(i).length).replace(/[-/]+$/, "")}-${i}`;
   return n;

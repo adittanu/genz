@@ -14,7 +14,7 @@ The window has no system title bar (`titlebar: "none"`; macOS lights at 12, 16).
 2. **Spaces**, flexible (weight 0.67, min 34). Header 38 px: a chevron, "Spaces", a count pill, and at the right a search button and a + button. Clicking the chevron or title folds the whole block to a 38 px header (and the header then shows the active space's name at the right). Rows are 34 px (28 px for worktree children), radius 10, 8 px side padding. Each row has a 22 px radius-7 avatar with the space's first letter in white on one of six colors (`#22a99a`, `#e3814f`, `#5b8def`, `#8b7cf6`, `#3fae6a`, `#d9649a`, handed out least-used first and stored in shared `space.colors`). A space that isn't a saved project gets an outlined avatar with `dim` letter. The home space `~` shows a house tile and reads "Home". After the name, right-aligned and `dim` 11.5 px: repo and branch only when unusual (not `main`/`master`, not equal to the name), then `↑n` in `ansi2` and `↓n` in `ansi1`. A space with a working agent shows a small spinner at the row's end; blocked or done shows an 8 px dot in the `blocked` or `done` color. The active row has the `selected` background and a 3 px `accent` bar on its left edge. Worktree spaces are listed under their repo's row, joined by a thin curved line (`dim` at 33% alpha), with a count chip on the repo row ("2 ˅") that folds them. When another machine is known, each machine gets a foldable header row (this computer first), with its spaces indented under it. The list scrolls with the wheel and draws no scrollbar.
 3. **Agents**, flexible (weight 1.73, min 90), `border` line on top. Header 38 px: "Agents" (12 px, semibold, `muted`); a `blocked`-tinted pill "N need you" when any agent is blocked; a `working`-tinted pill with a spinner and the count when any is working; then a search button, a two-button switch (clock = Priority, layers = Grouped by project; the chosen one has a `raised` background inside a `hover` track), and a pen button (new agent). The list is described below. It draws no scrollbar and scrolls with the wheel.
 4. **Settled shelf**, docked at the very bottom of the agents block, 1 px `border` on top. Header 32 px: a circle-check icon, "Settled", a count pill, then at the right a small pill `auto 3d` (or `auto off`) and a chevron. Folded by default. Open, it shows slim 30 px rows (agent icon 14 px, title 12.5 px in `muted`, and at the right how long ago it was settled, e.g. `5h`), at most 10 and then a `N more` / `Show less` row, inside a box that stops at 230 px and scrolls. Empty and open it says "Nothing yet. Agents idle for 3d land here."
-5. **Footer**, 96 px, `chrome`, 1 px top border. Three 28 px rows (radius 8, 14 px icon): Notes, Settings (with a 6 px `accent` dot when an app update is ready), Add machine (`dim`).
+5. **Footer**, 68 px, `chrome`, 1 px top border. Two 28 px rows (radius 8, 14 px icon): Notes and Settings (with a 6 px `accent` dot when an app update is ready). There is deliberately no "Add machine" row.
 
 **Right side** (a column):
 
@@ -68,7 +68,7 @@ root row
 │  ├─ sidebar-lists   column
 │  │  ├─ spaces       block genz-spaces            weight 0.67, min 34
 │  │  └─ agents       block genz-agents            weight 1.73, min 90
-│  └─ sidebar-footer  block genz-chrome {footer: true}   px 96
+│  └─ sidebar-footer  block genz-chrome {footer: true}   px 68
 └─ work column  resizable false
    ├─ tabs            block genz-tabs              px 42, window_drag
    ├─ work-body       row, padding 8, gap 8
@@ -82,14 +82,14 @@ root row
 
 **Mods** (each in `mods/<name>/`, `mod.json` has `"place": "none"`; icons referenced as `mods/<name>/x.svg`):
 
-- `genz-chrome`: brand row and, with `props.footer`, the footer. Uses `window()`, `layout()`, `updates()`, `run("layout.resize", {id: "sidebar", px})`, shared `sidebar.width` / `sidebar.collapsed`. Opens `apple-notes` and `machine-add` (shipped) with `mod.open`. Own icons: `notes.svg`, `filter.svg`.
+- `genz-chrome`: brand row and, with `props.footer`, the footer. Uses `window()`, `layout()`, `updates()`, `run("layout.resize", {id: "sidebar", px})`, shared `sidebar.width` / `sidebar.collapsed`. Opens `apple-notes` with `mod.open` and `app.settings`. Own icons: `notes.svg`, `filter.svg`.
 - `genz-spaces`: the Spaces list. Uses `spaces()`, `panes()`, `machines()`, `hc(["machine","ls","--json"])`, `exec("git", ...)` (status --porcelain=v2 --branch, rev-parse), `watchFolder` on repos, `run("space.select" | "space.move" | "space.new" | "layout.resize")`, shared `space.colors` and `spaces.weight`. Reads the projects cache at `globalThis.__wranglerProjects.known.projects`. Calls `projects.pick`, `projects.new-menu`, `projects.space-menu:<id>|linked|main@x,y`, `projects.row-menu`, `projects.menu`, `projects.open`. Own icon: `house.svg`. Uses `overflow_y_scroll()` on an element with an `id` (no scrollbar).
 - `genz-agents`: the Agents list and Settled shelf. Uses `agents()`, `terminals()` (`labels.settled`, `turn`, `parent`), `panes()`, `focused()`, `spaces()`, `hc(["label", ...])`, `hc(["get", address, "--json"])` (`status_ms`), `setAgentOrder`, `notify`, `exec` (git; `sh` to list Claude sub-agent files), `readTextFile`, `watchFolder`, shared `agents.sort` ("priority" | "grouped") and `agents.settleDays`, localStorage `pins`, `changed`, `revived`, `settled-open`, `checkouts`. Calls `pane.focus`, `pane.close`, `space.close`, `tab.new`, `projects.switch`, `projects.compose`, `projects.agent-menu`, `projects.peek:<address>`. Reads `globalThis.__wranglerProjects.memo` for branches. Own icons: `bot.svg`, `undo.svg`. Shipped icons used: `workspace-chrome/{spinner,circle-check,pin,pin-off,x,search,layers,clock,square-pen,branch,chevron-down,chevron-right,check,server}.svg`. The lists use `overflow_y_scroll()`, not `overflow_y_scrollbar()`.
 - `genz-tabs`: the tab bar (see above). Own icons: `win-min.svg`, `win-max.svg`, `win-restore.svg`, `win-close.svg`. Opens overlays `menu` and `new-menu`; icons from `files`, `changes`, `quota`, `ssh-hosts`, `insights`, `pane`.
 - Helper mods, bundled as they are and reached only through commands: `projects` (host: saved projects in `data/projects/projects.json`, git worktrees, new-agent flow, agent/space/row menus, peek; commands `projects.switch|pick|compose|peek|peek-go|peek-close|agent-menu|space-menu|row-menu|new-menu|menu|open|...`; it fills `globalThis.__wranglerProjects = {known, memo, ver}`), `projects-ui` (its dialogs, pickers, menus and peek bar), `quota` (a 9Router quota panel), `apple-notes` (a notes window), `insights` (usage analytics tab), `ssh-hosts` (ssh config tab).
-- Shipped mods used: `pane` (pane header), `files`, `changes`, `workspace-status`, `workspace-chrome` (icons only), `menu`, `new-menu`, `machine-add`, `worktree`, `toast`.
+- Shipped mods used: `pane` (pane header), `files`, `changes`, `workspace-status`, `workspace-chrome` (icons only), `menu`, `new-menu`, `worktree`, `toast`.
 
-**Programs it runs:** `git`, `sh` (with `rm`, `mkdir`, `readlink`, `test`, `sleep`), `hc`, `curl` (quota panel), `claude` (projects: branch naming and hooks). **Network:** only the quota panel, to the 9Router server URL the person types in.
+**Programs it runs:** `git`, `hc`, `curl` (quota panel), `claude` (projects: branch naming and hooks), and on Windows `powershell` (only to wait: `Start-Sleep`). `sh` is used only for other ssh machines. **Network:** only the quota panel, to the 9Router server URL the person types in.
 
 **Art:** `backgrounds/ocean-header.png`; SVG icons inside each mod folder.
 
@@ -106,14 +106,14 @@ root row
 - The settle button needs the agent to be finished. Working or blocked agents (or ones with a working sub-agent) don't get it.
 - The `projects` mod keeps `git config branch.<name>.wranglerTemp` and the `wrangler` log folder under `$XDG_STATE_HOME`; those names are from an earlier life of the mod and are kept so existing worktrees still work.
 - The quota panel stores the 9Router password as plain text in `data/9router-quota.json`.
-- `sh`, `rm`, `readlink` etc. must be on the PATH Herdr runs commands with (on Windows, Git for Windows' `usr/bin`).
+- Windows has no `mkdir`, `test`, `rm`, `readlink`, `sleep` or `sh` on the PATH Herdr runs commands with, and `exec("mkdir")` fails with "cannot run mkdir". That broke Open folder and New project. Do folders and files with `fs/promises` (`mkdir {recursive}`, `exists`, `readdir`, `readFile`, `unlink`, `rmdir`) and waits with `powershell -Command Start-Sleep`; keep the POSIX versions for non-Windows. Import every helper you use: `herdr-app check` does not catch an undefined name, the toast "mkdirp is not defined" does.
 - Controls that do nothing: none on the layout itself; the Quota panel needs a 9Router server, Insights reads `~/.claude/projects` and `~/.codex/sessions` and is empty without them.
 
 ## Done when
 
 1. `herdr-app check` passes on every folder in `mods/`.
 2. `layout.switch {name: "genz"}` shows the layout and `herdr-app status` lists no errors.
-3. The sidebar is 342 px wide, with the brand row (42 px) on top, Spaces and Agents in the middle and the 96 px footer at the bottom, and no scrollbar shows in Spaces or Agents even with more rows than fit (the wheel still scrolls them).
+3. The sidebar is 342 px wide, with the brand row (42 px) on top, Spaces and Agents in the middle and the 68 px footer (Notes, Settings; no Add machine) at the bottom, and no scrollbar shows in Spaces or Agents even with more rows than fit (the wheel still scrolls them).
 4. Hovering an idle agent card shows three icons: pin, settle, close. Hovering a working agent shows pin only.
 5. Clicking settle moves the card out of its section into the Settled shelf; the count on the shelf header goes up by one, and `hc get <address> --json` shows a label `settled` of the form `<ms>:<turn>`.
 6. Opening the shelf shows the settled agent as a slim row with its age; hovering shows "Bring back" and Close; Bring back returns the card to Idle and removes the label.
@@ -122,3 +122,4 @@ root row
 9. With `agents.settleDays` set to 1 and an idle agent whose `status_ms` is older than a day, the agent is on the shelf within a minute.
 10. The tab bar has the pills, `+`, Files, Changes, Quota, SSH, Insights; Files opens the 482 px right panel, a second click hides it.
 11. A blocked agent shows "Needs you" in the list and a dot on its tab; a done agent shows "Done".
+12. On Windows, `projects.add:D:/some/folder` creates `data/projects/projects.json` with that folder as a project, and `projects.agent-start:{"id":"<id>","where":"local","agent":"none"}` opens a space there, both without an error toast.

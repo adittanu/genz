@@ -39,7 +39,7 @@
           "id": "sidebar-footer",
           "type": "block",
           "content": { "mod": "genz-chrome", "props": { "footer": true } },
-          "size": { "px": 96 }
+          "size": { "px": 68 }
         }
       ],
       "size": { "px": 342 },

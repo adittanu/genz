@@ -3,6 +3,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
+import * as fs from "fs/promises";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, closeOverlay, openOverlay, props, appHome, exec, home, readTextFile, watchFolder, window, layout, hc, notify } from "herdr";
 
 function find(node, id) {
@@ -84,7 +85,6 @@ const SETTLED_FIRST = 10;
 const SETTLED_MAX_H = 230;
 // personal: Claude's own sub-agents (Agent tool), from the files projects/hooks/subagents.sh keeps per terminal.
 const SUBS = () => `${appHome()}/data/projects/subagents`;
-const LIST_SUBS = `cd "$1" 2>/dev/null || exit 0; for f in */*.json; do [ -f "$f" ] || continue; printf '%s\\t' "\${f%%/*}"; tr -d '\\n' < "$f"; echo; done`;
 
 function duration(ms) {
   const m = Math.floor(ms / 60000);
@@ -152,7 +152,7 @@ export default class Agents extends View {
     this.subs = new Map();
     this.descs = new Map();
     cx.spawn(async (cx) => {
-      await exec("mkdir", ["-p", SUBS()]).catch(() => {});
+      await fs.mkdir(SUBS(), { recursive: true }).catch(() => {});
       for (;;) {
         await this.readSubs();
         cx.notify();
@@ -162,15 +162,19 @@ export default class Agents extends View {
     cx.timer.every(30000, () => this.sweep());
   }
 
+  // genz: read with fs, not sh/tr (no POSIX shell on Windows): <terminal>/<id>.json files, one per running sub-agent.
   async readSubs() {
     this.reading = true;
-    const r = await exec("sh", ["-c", LIST_SUBS, "sh", SUBS()]).catch(() => null);
     const m = new Map();
-    for (const line of (r?.stdout ?? "").split("\n")) {
-      const i = line.indexOf("\t");
-      if (i < 0) continue;
-      try { const t = line.slice(0, i); m.set(t, [...(m.get(t) ?? []), JSON.parse(line.slice(i + 1))]); } catch {}
-    }
+    try {
+      for (const t of await fs.readdir(SUBS())) {
+        let files = [];
+        try { files = await fs.readdir(`${SUBS()}/${t}`); } catch { continue; }
+        for (const f of files.filter((x) => x.endsWith(".json"))) {
+          try { m.set(t, [...(m.get(t) ?? []), JSON.parse(await fs.readFile(`${SUBS()}/${t}/${f}`, "utf8"))]); } catch {}
+        }
+      }
+    } catch {}
     for (const l of m.values()) l.sort((x, y) => (x.at ?? 0) - (y.at ?? 0));
     const ids = new Set([...m.values()].flat().map((c) => c.id));
     for (const id of this.descs.keys()) if (!ids.has(id)) this.descs.delete(id);
@@ -194,7 +198,14 @@ export default class Agents extends View {
   sweep() {
     const live = new Set(terminals().filter((k) => k.state === "live").map((k) => k.address));
     const gone = [...this.subs.keys()].filter((t) => live.size && !live.has(t) && /^[\w-]+$/.test(t));
-    if (gone.length) exec("rm", ["-rf", "--", ...gone.map((t) => `${SUBS()}/${t}`)]).catch(() => {});
+    for (const t of gone) this.removeDir(`${SUBS()}/${t}`);
+  }
+
+  async removeDir(dir) {
+    try {
+      for (const f of await fs.readdir(dir)) await fs.unlink(`${dir}/${f}`).catch(() => {});
+      await fs.rmdir(dir);
+    } catch {}
   }
 
   isFolded(addr, subs) {

@@ -1,6 +1,7 @@
 // Projects: data/projects/projects.json in the app home (Herdr's data folder for this mod), space layouts captured from and applied to it,
 // and worktrees made from a project's main checkout.
 import { appHome, exec, hc, home, panes, readTextFile, run, shared, spaces, theme, writeTextFile } from "herdr";
+import { mkdirp, sleep } from "./os.js";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "pwsh", "powershell"]);
 
@@ -13,9 +14,12 @@ const local = (id) => id.replace(/^[^/]*\//, "");
 
 /** Folder holding projects.json's real file (it may be a symlink), else dir(). */
 export async function watchDir() {
-  const r = await exec("readlink", ["-f", file()]);
-  const real = r.code === 0 ? r.stdout.trim() : "";
-  return real ? real.replace(/\/[^/]*$/, "") || "/" : dir();
+  // genz: no readlink on Windows (and nothing to follow there): the folder itself.
+  try {
+    const r = await exec("readlink", ["-f", file()]);
+    const real = r.code === 0 ? r.stdout.trim() : "";
+    return real ? real.replace(/\/[^/]*$/, "") || "/" : dir();
+  } catch { return dir(); }
 }
 
 // The host's cache, on globalThis (shared by every mod copy, unlike module scope): projects-ui's overlays draw
@@ -121,7 +125,7 @@ function known(text) {
 /** Reads projects.json, applies fn(data) (mutate or return new) and writes it if the file is still what
  *  was read; reads again on a concurrent write (3 tries). */
 export async function update(fn) {
-  await exec("mkdir", ["-p", dir()]);
+  await mkdirp(dir());
   for (let i = 0; ; i++) {
     const was = await readTextFile(file());
     const d = JSON.parse(JSON.stringify(known(was)));
@@ -325,7 +329,7 @@ export async function until(fn, tries = 60) {
   for (let i = 0; i < tries; i++) {
     const v = fn();
     if (v) return v;
-    await exec("sleep", ["0.05"]);
+    await sleep(50);
   }
   return null;
 }
@@ -455,7 +459,7 @@ async function fetchRef(cwd, remote, ref, on) {
   const t = s.code === 0 ? JSON.parse(s.stdout).address : null;
   if (!t) throw new Error(`Couldn't start git fetch: ${(s.stderr || s.stdout).trim()}`);
   for (let i = 0; i < 600; i++) {
-    await exec("sleep", ["0.5"]);
+    await sleep(500);
     const g = await info(t);
     if (g?.state !== "finished") continue;
     const out = g.exit_code ? (await hc(["read", t])).stdout.trim() : "";

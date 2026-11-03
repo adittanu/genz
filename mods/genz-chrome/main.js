@@ -42,8 +42,7 @@ export default class WorkspaceChrome extends View {
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
         .child(row("notes", "mods/genz-chrome/notes.svg", "Notes", false, () => run("mod.open", { name: "apple-notes" })))
         .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
-          .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent))))
-        .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
+          .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent))));
     }
     // No background: the layout paints the brand block's gradient.
     return h_flex().size_full().pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(14)

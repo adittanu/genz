@@ -96,7 +96,7 @@ The state lives on the agent's terminal as a label (`settled=<ms>:<turn>`), so i
 ## Good to know before you install
 
 - **Network:** only the Quota panel talks to a server, the 9Router URL you type in. Its password is saved as plain text in `data/9router-quota.json`.
-- **Programs it runs:** `git`, `sh` (with `rm`, `mkdir`, `readlink`, `test`, `sleep`), `hc`, `curl`. On Windows, `sh` comes from Git for Windows.
+- **Programs it runs:** `git`, `hc`, `curl` (Quota), `claude` (only if you use the branch-naming feature). On Windows the layout and its helper mods need no POSIX tools: folders, files and waits go through Herdr's `fs` and PowerShell. `sh` is only used to reach other ssh machines.
 - **Files outside its folder:** Insights reads your Claude and Codex session logs (`~/.claude/projects`, `~/.codex/sessions`) to build usage numbers. The `projects` mod can start Claude to name branches, and writes under `data/projects/`.
 - Tested on Herdr 0.1.x on Windows.
 

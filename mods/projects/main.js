@@ -22,6 +22,7 @@ import { View, div } from "gpui-kit";
 import { agents, closeOverlay, exec, focused, nextCommand, notify, openOverlay, panes, pickFolder, run, spaces, watchFolder } from "herdr";
 import { apply, bases, basesAge, capture, checkedOut, checkout, checkoutAge, knownData, mru, ownerNow, peekBases, peekCheckout, dir, expand, freeId, git, gitr, load, make, owner, place, spaceFor, tilde, track, until, update, used, viaLogin, watchDir, worktree } from "./lib.js";
 import { agentRun, branchName, claudeArgs, isAgent, tempBranch, titleOf } from "./agent.js";
+import { mkdirp } from "./os.js";
 
 const busy = new Set();
 
@@ -361,7 +362,7 @@ export default class Projects extends View {
     });
     cx.spawn(async (cx) => { await this.reload(); cx.notify(); });
     cx.spawn(async (cx) => {
-      await exec("mkdir", ["-p", dir()]);
+      await mkdirp(dir());
       for (;;) { await watchFolder(await watchDir()); await this.reload(); cx.notify(); }
     });
     cx.spawn(async (cx) => { for (;;) { await this.warm(); await cx.sleep(2000); } });
