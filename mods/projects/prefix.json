@@ -1,0 +1,10 @@
+{
+  "title": "Projects",
+  "items": [
+    { "show": "a", "label": "Switch agent", "run": "projects.switch" },
+    { "show": "⇧O", "label": "Projects", "bind": { "shift-o": "projects.pick" } },
+    { "show": "⇧A", "label": "New agent", "bind": { "shift-a": "projects.compose" } },
+    { "show": "g", "label": "New worktree", "run": "projects.worktree" },
+    { "show": "⇧S", "label": "Save layout", "bind": { "shift-s": "projects.save" } }
+  ]
+}

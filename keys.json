@@ -1,0 +1,11 @@
+{
+  "global": {
+    "ctrl-shift-a": "projects.switch",
+    "ctrl-shift-j": "projects.pick",
+    "ctrl-shift-g": "projects.compose",
+    "ctrl-shift-enter": "projects.peek-go",
+    "ctrl-shift-q": "projects.peek-close",
+    "ctrl-shift-m": "mod.open:apple-notes",
+    "ctrl-shift-b": "layout.toggle:sidebar"
+  }
+}
