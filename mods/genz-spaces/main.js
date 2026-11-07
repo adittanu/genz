@@ -118,7 +118,6 @@ export default class Spaces extends View {
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
-    this.atRoot = new Set(); // where()s in a repo at a drive's root, counted as plain folders (see check)
     this.pending = new Set(); // where()s to look at next
     this.busy = {}; // pane -> an agent working or a program in front of its shell
     this.ready = {}; // machine -> its layout was readable at the last look
@@ -227,7 +226,6 @@ export default class Spaces extends View {
       if (rp.code !== 0) {
         // Only git's own "no" is remembered as no repo; anything else is asked again.
         if (!/not a git repository/i.test(rp.stderr)) this.unsure.add(key);
-        this.atRoot.delete(key);
         this.git[key] = null;
         return;
       }
@@ -236,11 +234,9 @@ export default class Spaces extends View {
       // genz: a repo at a drive's root holds the whole disk, not a project. Its places (its worktrees'
       // too) count as plain folders, and its status isn't asked (it would walk the whole disk).
       if (/^([A-Za-z]:)?$/.test(top) || /^([A-Za-z]:)?\/\.git$/.test(repo)) {
-        this.atRoot.add(key);
         this.git[key] = null;
         return;
       }
-      this.atRoot.delete(key);
       // No optional locks: a status that touched the index would wake the watch again.
       // Writes nothing under .git (index lock, fsmonitor cookie): watch() would wake on it.
       const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"], { cwd, on });
@@ -289,10 +285,13 @@ export default class Spaces extends View {
     run(g ? `projects.space-menu:${w.id}${g.linked ? "|linked" : "|main"}${at}` : `projects.row-menu:${w.id}${at}`);
   }
 
-  // What a row calls its space: its name, else Herdr's (where its first terminal is: repo, else
-  // folder, "~" at home). genz: in a repo at a drive's root Herdr says "D:"; the folder it's in instead.
+  // What a row calls its space: its name, else where its first terminal is (Herdr's rule: its repo,
+  // else its folder, "~" at home). genz: outside a repo (a drive-root one counts, see check) the
+  // folder is taken from where it is now, not from Herdr's name: Herdr calls a drive-root repo "D:",
+  // and keeps a repo's name it once saw until it restarts.
   label(w, ps) {
-    if (w.named || !this.atRoot.has(where(w, ps))) return w.name;
+    const key = where(w, ps);
+    if (w.named || w.name === "~" || this.git[key] !== null || this.unsure.has(key)) return w.name;
     return base(place(w, ps)) || w.name;
   }
 
