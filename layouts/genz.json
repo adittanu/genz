@@ -32,9 +32,8 @@
                 "mod": "genz-spaces"
               },
               "size": {
-                "weight": 0.6700000166893005
-              },
-              "min": 34
+                "px": 0
+              }
             },
             {
               "id": "agents",
@@ -43,11 +42,11 @@
                 "mod": "genz-agents"
               },
               "size": {
-                "weight": 1.7300000190734863
-              },
-              "min": 90
+                "weight": 1
+              }
             }
-          ]
+          ],
+          "resizable": false
         },
         {
           "id": "sidebar-footer",

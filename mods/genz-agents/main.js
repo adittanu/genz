@@ -126,6 +126,45 @@ function headerButton(id, src, tip, t, action) {
     .child(svg(src).size(14));
 }
 
+// genz: the sidebar shows Spaces or Agents, not both. The switch in either header picks one; the
+// other block shrinks to 0 px instead of being hidden, so it keeps running (like the projects host)
+// and this list still orders agents and settles them while Spaces is up. The sizes are the
+// layout's own, so the choice survives restarts. Kept the same in genz-spaces and genz-agents.
+function listShown() {
+  const l = layout();
+  if (find(l, "spaces")?.size?.px === 0) return "agents";
+  if (find(l, "agents")?.size?.px === 0) return "spaces";
+  return null;
+}
+function showList(id) {
+  run("layout.resize", { id, weight: 1 });
+  run("layout.resize", { id: id === "spaces" ? "agents" : "spaces", px: 0 });
+}
+function listSwitch(own, t, { spaces: nSpaces, blocked, working }) {
+  const on = listShown() ?? own;
+  const seg = (id, label, extra) => h_flex().id(`list-${id}`).h(22).px(8).gap(6).flex_none().items_center().rounded(5)
+    .text_color(on === id ? t.foreground : t.dim)
+    .when(on === id, (e) => e.bg(t.raised))
+    .when(on !== id, (e) => e.cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click(() => showList(id)))
+    .child(label).children(extra);
+  const count = (n, color, mark) => h_flex().flex_none().gap(3).items_center().text_size(10.5).font_medium().text_color(color)
+    .when(Boolean(mark), (e) => e.child(mark)).child(String(n));
+  return h_flex().flex_none().gap(1).p(2).rounded(7).bg(t.hover)
+    .child(seg("spaces", "Spaces", [count(nSpaces, t.dim)]))
+    .child(seg("agents", "Agents", [
+      ...(blocked > 0 ? [count(blocked, t.blocked, div().size(6).rounded(3).bg(t.blocked))] : []),
+      ...(working > 0 ? [count(working, t.working, svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900))] : []),
+    ]));
+}
+// In the narrow rail: one button that shows the other list.
+function railSwitch(own, t) {
+  const other = (listShown() ?? own) === "spaces" ? "agents" : "spaces";
+  return div().id("list-rail").size(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.dim)
+    .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(other === "spaces" ? "Show spaces" : "Show agents")
+    .on_click(() => showList(other))
+    .child(svg(other === "spaces" ? "mods/workspace-chrome/layers.svg" : "mods/genz-agents/bot.svg").size(14));
+}
+
 export default class Agents extends View {
   init(_props, cx) {
     if (props()?.sortMenu) return;
@@ -999,19 +1038,14 @@ export default class Agents extends View {
       .size_full()
       .min_h(0)
       .bg(t.chrome)
-      .border_t(1)
-      .border_color(t.border)
+      // genz: the rule over this list only separates it from Spaces when both show.
+      .when(listShown() === null, (el) => el.border_t(1).border_color(t.border))
       .text_size(13)
-      // personal: switcher, sort and new agent on the header; in the rail, new agent on top.
-      // personal: title with a live count of what needs you / is working, search, a two-way view switch, new agent.
-      .when(!collapsed, (el) => el.child(h_flex().pl(16).pr(10).h(38).pt(6).flex_none().items_center().gap(4)
+      // personal: switcher, sort and new agent on the header; in the rail, the Spaces switch and new agent on top.
+      // genz: the Spaces | Agents switch (with live counts of what needs you / is working), search, a two-way view switch, new agent.
+      .when(!collapsed, (el) => el.child(h_flex().pl(10).pr(10).h(38).pt(6).flex_none().items_center().gap(4)
         .text_size(12).font_semibold().text_color(t.muted)
-        .child(div().child("Agents"))
-        .when(nBlocked > 0, (e) => e.child(div().ml(4).flex_none().px(6).h(16).rounded(8).bg(t.blocked + "26").flex().items_center()
-          .text_size(10.5).font_semibold().text_color(t.blocked).child(`${nBlocked} need you`)))
-        .when(nWorking > 0, (e) => e.child(h_flex().ml(4).flex_none().px(6).h(16).gap(4).rounded(8).bg(t.working + "22").items_center()
-          .text_size(10.5).font_semibold().text_color(t.working)
-          .child(svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900)).child(`${nWorking}`)))
+        .child(listSwitch("agents", t, { spaces: spaces().length, blocked: nBlocked, working: nWorking }))
         .child(div().flex_1())
         .child(headerButton("ag-find", "mods/workspace-chrome/search.svg", "Switch agent (⌃⇧A)", t, () => run("projects.switch")))
         .child(h_flex().gap(1).p(2).mx(2).rounded(7).bg(t.hover).children(SORTS.map((s) => {
@@ -1024,7 +1058,8 @@ export default class Agents extends View {
             .child(svg(`mods/workspace-chrome/${s.icon}.svg`).size(13));
         })))
         .child(headerButton("ag-new", "mods/workspace-chrome/square-pen.svg", "New agent", t, () => run("projects.compose")))))
-      .when(collapsed, (el) => el.child(h_flex().h(36).flex_none().items_center().justify_center()
+      .when(collapsed, (el) => el.child(v_flex().pt(7).pb(7).gap(6).flex_none().items_center()
+        .child(railSwitch("agents", t))
         .child(headerButton("ag-new", "mods/workspace-chrome/square-pen.svg", "New agent", t, () => run("projects.compose")))))
       .when(list.length === 0 && !collapsed, (el) =>
         el.child(div().px(16).py(6).text_size(12).text_color(t.dim).child("No agents yet. Start one with the pen above.")),

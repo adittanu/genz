@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, home, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, agents, run, openOverlay, exec, hc, home, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -27,14 +27,44 @@ function place(s, ps) {
 }
 const rowHeight = ({ tree }) => (tree ? 28 : 34);
 
-// personal: the Spaces block folds to its header; it goes by the block's own size, so it survives restarts.
-const FOLDED_PX = 38;
-const spacesSize = () => find(layout(), "spaces")?.size;
-const spacesFolded = () => (spacesSize()?.px ?? Infinity) <= FOLDED_PX + 8;
-function toggleSpaces() {
-  if (spacesFolded()) return run("layout.resize", { id: "spaces", weight: shared("spaces.weight") ?? 0.854 });
-  setShared("spaces.weight", spacesSize()?.weight ?? 0.854);
-  run("layout.resize", { id: "spaces", px: FOLDED_PX });
+// genz: the sidebar shows Spaces or Agents, not both. The switch in either header picks one; the
+// other block shrinks to 0 px instead of being hidden, so it keeps running (like the projects host)
+// and the agents list still orders agents and settles them while Spaces is up. The sizes are the
+// layout's own, so the choice survives restarts. Kept the same in genz-spaces and genz-agents.
+function listShown() {
+  const l = layout();
+  if (find(l, "spaces")?.size?.px === 0) return "agents";
+  if (find(l, "agents")?.size?.px === 0) return "spaces";
+  return null;
+}
+function showList(id) {
+  run("layout.resize", { id, weight: 1 });
+  run("layout.resize", { id: id === "spaces" ? "agents" : "spaces", px: 0 });
+}
+function listSwitch(own, t, { spaces: nSpaces, blocked, working }) {
+  const on = listShown() ?? own;
+  const seg = (id, label, extra) => h_flex().id(`list-${id}`).h(22).px(8).gap(6).flex_none().items_center().rounded(5)
+    .text_color(on === id ? t.foreground : t.dim)
+    .when(on === id, (e) => e.bg(t.raised))
+    .when(on !== id, (e) => e.cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click(() => showList(id)))
+    .child(label).children(extra);
+  const count = (n, color, mark) => h_flex().flex_none().gap(3).items_center().text_size(10.5).font_medium().text_color(color)
+    .when(Boolean(mark), (e) => e.child(mark)).child(String(n));
+  return h_flex().flex_none().gap(1).p(2).rounded(7).bg(t.hover)
+    .child(seg("spaces", "Spaces", [count(nSpaces, t.dim)]))
+    .child(seg("agents", "Agents", [
+      ...(blocked > 0 ? [count(blocked, t.blocked, div().size(6).rounded(3).bg(t.blocked))] : []),
+      ...(working > 0 ? [count(working, t.working, svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900))] : []),
+    ]));
+}
+// In the narrow rail: one button that shows the other list.
+function railSwitch(own, t) {
+  const other = (listShown() ?? own) === "spaces" ? "agents" : "spaces";
+  return h_flex().h(36).flex_none().items_center().justify_center()
+    .child(div().id("list-rail").size(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.dim)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(other === "spaces" ? "Show spaces" : "Show agents")
+      .on_click(() => showList(other))
+      .child(svg(other === "spaces" ? "mods/workspace-chrome/layers.svg" : "mods/genz-agents/bot.svg").size(14)));
 }
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
@@ -476,23 +506,20 @@ export default class Spaces extends View {
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
-    const folded = !collapsed && spacesFolded();
-    const active = sp.find((p) => p.active);
+    // While Agents is up this block is 0 px: skip the agent counts its switch would show.
+    const ags = listShown() === "agents" ? [] : agents();
+    const counts = { spaces: sp.length, blocked: ags.filter((a) => a.status === "blocked").length, working: ags.filter((a) => a.status === "working").length };
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      // personal: the header folds the whole block (chevron + title), finds a project (picker) and opens the new space / project menu where it was clicked.
-      .when(!collapsed, el => el.child(h_flex().h(38).flex_none().pl(8).pr(10).pt(6).gap(4).items_center().text_size(12).font_semibold().text_color(t.muted)
-        .child(h_flex().id("sp-fold").h(24).pl(6).pr(8).gap(6).items_center().rounded(6).cursor_pointer().flex_none()
-          .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(folded ? "Show spaces" : "Hide spaces").on_click(toggleSpaces)
-          .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(12).flex_none())
-          .child(div().child("Spaces"))
-          .child(div().flex_none().px(6).h(16).rounded(8).bg(t.hover).flex().items_center().text_size(10.5).font_medium().text_color(t.dim).child(String(sp.length))))
-        .child(div().flex_1().min_w(0).truncate().text_size(11.5).font_normal().text_color(t.dim).text_right()
-          .child(folded ? (active?.name === "~" ? "Home" : active?.name ?? "") : ""))
-        .when(!folded, (e) => e.child(headerButton("sp-find", "search", "Find project (⌃⇧J)", t, () => run("projects.pick"))))
-        .when(!folded, (e) => e.child(headerButton("sp-new", "plus", "New space or project", t,
-          (ev) => run(ev?.position ? `projects.new-menu@${Math.round(ev.position.x)},${Math.round(ev.position.y)}` : "projects.new-menu"))))))
-      .when(!folded, (el) => el.child(v_flex().id("sp-list").flex_1().min_h(0).px(8).pb(8).gap(2).overflow_y_scroll()
+      // genz: the header switches the sidebar between Spaces and Agents, finds a project (picker) and opens the new space / project menu where it was clicked.
+      .when(!collapsed, el => el.child(h_flex().h(38).flex_none().pl(10).pr(10).pt(6).gap(4).items_center().text_size(12).font_semibold().text_color(t.muted)
+        .child(listSwitch("spaces", t, counts))
+        .child(div().flex_1())
+        .child(headerButton("sp-find", "search", "Find project (⌃⇧J)", t, () => run("projects.pick")))
+        .child(headerButton("sp-new", "plus", "New space or project", t,
+          (ev) => run(ev?.position ? `projects.new-menu@${Math.round(ev.position.x)},${Math.round(ev.position.y)}` : "projects.new-menu")))))
+      .when(collapsed, (el) => el.child(railSwitch("spaces", t)))
+      .child(v_flex().id("sp-list").flex_1().min_h(0).px(8).pb(8).gap(2).overflow_y_scroll()
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
-        .children(this.grouped(t, collapsed))));
+        .children(this.grouped(t, collapsed)));
   }
 }
