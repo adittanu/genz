@@ -3,6 +3,8 @@
 // The body is still markdown in notes.json, but it edits like Apple Notes:
 // "* ", "[]" and "1. " become a bullet, a checklist and a numbered line,
 // and "# ", "> " and "---" become a heading, a quote and a divider.
+// To-do, above the folders, lists every open checklist. Hover a checklist
+// line to send that one item to an agent in the focused space, or to a new one.
 // Everything is kept in data/apple-notes/notes.json, so the notes survive
 // restarts and belong to no layout. Opens as a window (mod.json) with
 // `mod.open:apple-notes`; Cmd/Ctrl+N makes a note and Cmd/Ctrl+F jumps to
@@ -10,7 +12,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState, Textarea, TextareaState, Checkbox, Link } from "gpui-base";
-import { theme, settings, appHome, props, closeOverlay } from "herdr";
+import { theme, settings, appHome, props, closeOverlay, exec, agents, focused, spaces, knownAgents, hc, run, notify, openOverlay } from "herdr";
 import * as fs from "fs/promises";
 
 const YELLOW = "#f2c14e";
@@ -189,6 +191,32 @@ function stripMarkup(line) {
 }
 const plainLines = (text) => String(text ?? "").split("\n").map(stripMarkup).filter(Boolean);
 const titleOf = (n) => n.title.trim() || plainLines(n.body)[0] || "New Note";
+function openChecks(note) {
+  const items = [];
+  parseBody(note.body).forEach((b, index) => {
+    if (b.kind !== "check" || b.checked) return;
+    const text = stripMarkup(b.text);
+    if (text) items.push({ index, text });
+  });
+  return items;
+}
+function taskPrompt(note, text) {
+  const others = [];
+  let skipped = false;
+  for (const item of openChecks(note)) {
+    if (!skipped && item.text === text) {
+      skipped = true;
+      continue;
+    }
+    others.push(item.text);
+  }
+  const lines = [`From Notes, "${titleOf(note)}":`, "", text];
+  if (others.length) {
+    lines.push("", "Other open items in this note, for context only. Do not do these unless asked:");
+    for (const item of others) lines.push(`- ${item}`);
+  }
+  return lines.join("\n");
+}
 const snippetOf = (n) => {
   const lines = plainLines(n.body);
   return lines[1] || lines[0] || "No additional text";
@@ -267,6 +295,19 @@ function seed() {
 
 export default class AppleNotes extends View {
   init(_props, cx) {
+    const given = props() ?? {};
+    if (given.mode === "send") {
+      this.agentChoices = [];
+      this.agentsReady = false;
+      const machine = given.machine;
+      cx.spawn(async (cx) => {
+        const list = await knownAgents(machine ? { on: machine } : {}).catch(() => []);
+        this.agentChoices = list.filter((a) => a.installed);
+        this.agentsReady = true;
+        cx.notify();
+      });
+      return;
+    }
     this.data = null;
     this.folder = "all";
     this.selected = null;
@@ -280,6 +321,8 @@ export default class AppleNotes extends View {
     this.handles = {};
     this.focused = null;
     this.caret = 0;
+    this.cursor = 0;
+    this.hoverLine = null;
 
     this.title = InputState.new({ placeholder: "Title" });
     this.search = InputState.new({ placeholder: "Search" });
@@ -380,6 +423,7 @@ export default class AppleNotes extends View {
     this.handles = {};
     this.focused = null;
     this.caret = 0;
+    this.cursor = 0;
     this.splitting = false;
   }
 
@@ -420,25 +464,31 @@ export default class AppleNotes extends View {
     return state;
   }
 
-  editLine(i, cx) {
+  editLine(i, cx, place) {
     const b = this.blocks[i];
     if (!b) return;
     this.caret = i;
-    if (b.kind === "rule") {
-      if (!this.handles[b.id]) this.handles[b.id] = cx.focus_handle();
-      this.focused = i;
-      cx.notify();
-      this.handles[b.id].focus();
-      return;
-    }
-    const noteId = this.selected;
-    if (!this.lineStates[i]) this.lineStates[i] = this.makeState(b);
-    const state = this.lineStates[i];
+    if (!this.handles[b.id]) this.handles[b.id] = cx.focus_handle();
+    const len = b.text.length;
+    if (typeof place === "number") this.cursor = Math.max(0, Math.min(len, place));
+    else if (place === "start") this.cursor = 0;
+    else if (place === "end" || this.focused !== i) this.cursor = len;
     this.focused = i;
+    if (b.kind === "code" && !this.lineStates[i]) this.lineStates[i] = this.makeState(b);
+    const noteId = this.selected;
+    const handle = this.handles[b.id];
+    const state = this.lineStates[i];
     cx.notify();
     cx.timer.after(20, () => {
       if (this.selected !== noteId || this.focused !== i) return;
-      try { state.focus(); } catch {}
+      try {
+        if (b.kind === "code" && state) {
+          state.focus();
+          const n = state.value().length;
+          const at = this.cursor ?? n;
+          state.set_selected_range({ start: at, end: at });
+        } else handle.focus();
+      } catch {}
     });
   }
 
@@ -508,12 +558,14 @@ export default class AppleNotes extends View {
     b.kind = hit.kind;
     b.checked = !!hit.checked;
     b.text = hit.text;
+    this.cursor = hit.text.length;
     if (state) {
       this.applying = true;
       state.set_value(hit.text);
       this.applying = false;
     }
     this.commit(cx);
+    cx.notify();
   }
 
   applySplit(i, parts, cx) {
@@ -632,6 +684,16 @@ export default class AppleNotes extends View {
   onKey(i, e, cx) {
     const b = this.blocks[i];
     if (!b) return;
+    if (e.key === "up") {
+      if (i > 0) this.editLine(i - 1, cx, "end");
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "down") {
+      if (i + 1 < this.blocks.length) this.editLine(i + 1, cx, "start");
+      cx.stop_propagation();
+      return;
+    }
     const cmd = e.modifiers.platform || e.modifiers.control;
     if (cmd && e.key === "b" && !e.modifiers.shift) return this.finishKey(cx, () => this.toggleWrap(i, "**", cx));
     if (cmd && e.key === "i" && !e.modifiers.shift) return this.finishKey(cx, () => this.toggleWrap(i, "*", cx));
@@ -696,6 +758,244 @@ export default class AppleNotes extends View {
     cx.stop_propagation();
   }
 
+  keyLine(i, e, cx) {
+    const b = this.blocks[i];
+    if (!b) return;
+    const cmd = e.modifiers.platform || e.modifiers.control;
+    if (e.key === "up") {
+      if (i > 0) this.editLine(i - 1, cx, "end");
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "down") {
+      if (i + 1 < this.blocks.length) this.editLine(i + 1, cx, "start");
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "left") {
+      if ((this.cursor || 0) > 0) {
+        this.cursor -= 1;
+        cx.notify();
+      } else if (i > 0) this.editLine(i - 1, cx, "end");
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "right") {
+      if ((this.cursor || 0) < b.text.length) {
+        this.cursor += 1;
+        cx.notify();
+      } else if (i + 1 < this.blocks.length) this.editLine(i + 1, cx, "start");
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "home") {
+      this.cursor = 0;
+      cx.notify();
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "end") {
+      this.cursor = b.text.length;
+      cx.notify();
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "backspace") {
+      this.backspaceLine(i, cx);
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "delete") {
+      this.deleteForward(i, cx);
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "enter") {
+      this.splitAtCursor(i, cx);
+      cx.stop_propagation();
+      return;
+    }
+    if (e.key === "tab") {
+      this.onKey(i, e, cx);
+      return;
+    }
+    if (cmd && e.key === "v") {
+      cx.stop_propagation();
+      cx.spawn(async (cx) => {
+        let text = "";
+        try {
+          const got = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"]);
+          text = got.stdout ?? "";
+        } catch {
+          return;
+        }
+        if (this.focused !== i) return;
+        this.pasteText(i, text, cx);
+      });
+      return;
+    }
+    if (cmd && (e.key === "b" || e.key === "i" || e.key === "u" || e.key === "e" || (e.modifiers.shift && (e.key === "x" || e.key === "8" || e.key === "7")))) {
+      this.onKey(i, e, cx);
+      return;
+    }
+    if (e.key_char && !cmd && !e.modifiers.alt && !e.modifiers.control) {
+      this.insertChars(i, e.key_char, cx);
+      cx.stop_propagation();
+    }
+  }
+
+  insertChars(i, extra, cx) {
+    const b = this.blocks[i];
+    if (!b || !extra) return;
+    const next = b.text.slice(0, this.cursor || 0) + extra + b.text.slice(this.cursor || 0);
+    const hit = b.kind === "code" ? null : shortcut(next);
+    if (hit) {
+      b.text = next;
+      this.applyShortcut(i, hit, cx);
+      return;
+    }
+    b.text = next;
+    this.cursor = (this.cursor || 0) + extra.length;
+    this.commit(cx);
+    cx.notify();
+  }
+
+  pasteText(i, raw, cx) {
+    const text = String(raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u0000/g, "");
+    if (!text || !this.blocks[i]) return;
+    if (!text.includes("\n")) {
+      this.insertChars(i, text, cx);
+      return;
+    }
+    const b = this.blocks[i];
+    const left = b.text.slice(0, this.cursor || 0);
+    const right = b.text.slice(this.cursor || 0);
+    const parts = text.split("\n");
+    parts[0] = left + parts[0];
+    parts[parts.length - 1] += right;
+    b.text = parts[0];
+    this.applySplit(i, parts, cx);
+  }
+
+  backspaceLine(i, cx) {
+    const b = this.blocks[i];
+    if (!b) return;
+    const at = this.cursor || 0;
+    if (at > 0) {
+      b.text = b.text.slice(0, at - 1) + b.text.slice(at);
+      this.cursor = at - 1;
+      this.commit(cx);
+      cx.notify();
+      return;
+    }
+    if (b.kind === "code") return;
+    if (LIST.has(b.kind) && (b.indent || 0) > 0) {
+      b.indent -= 1;
+      this.commit(cx);
+      cx.notify();
+      return;
+    }
+    if (b.kind !== "p") {
+      b.kind = "p";
+      b.checked = false;
+      this.commit(cx);
+      cx.notify();
+      return;
+    }
+    if (i > 0) this.mergeUp(i, cx);
+  }
+
+  deleteForward(i, cx) {
+    const b = this.blocks[i];
+    if (!b) return;
+    const at = this.cursor || 0;
+    if (at < b.text.length) {
+      b.text = b.text.slice(0, at) + b.text.slice(at + 1);
+      this.commit(cx);
+      cx.notify();
+      return;
+    }
+    const next = this.blocks[i + 1];
+    if (!next) return;
+    if (next.kind === "rule") {
+      this.blocks.splice(i + 1, 1);
+      this.lineStates.splice(i + 1, 1);
+      this.dropHandle(next.id, cx);
+      this.commit(cx);
+      this.editLine(i, cx, at);
+      return;
+    }
+    b.text += next.text;
+    this.blocks.splice(i + 1, 1);
+    this.lineStates.splice(i + 1, 1);
+    this.dropHandle(next.id, cx);
+    this.commit(cx);
+    this.editLine(i, cx, at);
+  }
+
+  mergeUp(i, cx) {
+    const prev = this.blocks[i - 1];
+    const cur = this.blocks[i];
+    if (!prev || !cur) return;
+    if (prev.kind === "rule") {
+      this.blocks.splice(i - 1, 1);
+      this.lineStates.splice(i - 1, 1);
+      this.dropHandle(prev.id, cx);
+      this.commit(cx);
+      this.editLine(i - 1, cx, 0);
+      return;
+    }
+    if (prev.kind === "code") {
+      this.editLine(i - 1, cx, "end");
+      return;
+    }
+    const at = prev.text.length;
+    prev.text = prev.text + cur.text;
+    if (this.lineStates[i - 1]) {
+      this.applying = true;
+      this.lineStates[i - 1].set_value(prev.text);
+      this.applying = false;
+    }
+    this.blocks.splice(i, 1);
+    this.lineStates.splice(i, 1);
+    this.dropHandle(cur.id, cx);
+    this.commit(cx);
+    this.editLine(i - 1, cx, at);
+  }
+
+  dropHandle(id, cx) {
+    const handle = this.handles[id];
+    if (!handle) return;
+    delete this.handles[id];
+    cx.timer.after(40, () => { try { handle.release(); } catch {} });
+  }
+
+  splitAtCursor(i, cx) {
+    const b = this.blocks[i];
+    if (!b || b.kind === "code") return;
+    const at = this.cursor || 0;
+    const left = b.text.slice(0, at);
+    const right = b.text.slice(at);
+    const listish = LIST.has(b.kind) || b.kind === "quote";
+    if (listish && left === "" && right === "") {
+      if ((b.indent || 0) > 0 && b.kind !== "quote") b.indent -= 1;
+      else {
+        b.kind = "p";
+        b.checked = false;
+      }
+      this.commit(cx);
+      cx.notify();
+      return;
+    }
+    b.text = left;
+    const child = make(nextKind(b.kind), right);
+    if (listish) child.indent = b.indent || 0;
+    this.blocks.splice(i + 1, 0, child);
+    this.lineStates.splice(i + 1, 0, null);
+    this.commit(cx);
+    this.editLine(i + 1, cx, "start");
+  }
+
   editTitle(cx) {
     if (this.applying) return;
     const n = this.current();
@@ -722,7 +1022,7 @@ export default class AppleNotes extends View {
 
   newNote(cx) {
     if (!this.data) return;
-    const folder = this.folder === "all" ? this.data.folders[0]?.id ?? "notes" : this.folder;
+    const folder = this.folder === "all" || this.folder === "todo" ? this.data.folders[0]?.id ?? "notes" : this.folder;
     const now = Date.now();
     const n = { id: uid(), folder, title: "", body: "", created: now, updated: now };
     this.data.notes.push(n);
@@ -746,9 +1046,58 @@ export default class AppleNotes extends View {
 
   pickFolder(id, cx) {
     this.folder = id;
-    const list = this.notes();
-    if (!list.some((n) => n.id === this.selected)) this.show(list[0] ?? null);
+    if (id !== "todo") {
+      const list = this.notes();
+      if (!list.some((n) => n.id === this.selected)) this.show(list[0] ?? null);
+    }
     cx.notify();
+  }
+
+  openCount() {
+    return this.data.notes.reduce((n, note) => n + openChecks(note).length, 0);
+  }
+
+  taskGroups() {
+    const f = this.filter.trim().toLowerCase();
+    const groups = [];
+    const notes = [...this.data.notes].sort((a, b) => b.updated - a.updated);
+    for (const note of notes) {
+      const items = openChecks(note).filter((item) => !f || `${item.text} ${titleOf(note)}`.toLowerCase().includes(f));
+      if (items.length) groups.push({ note, items });
+    }
+    return groups;
+  }
+
+  openTask(note, index, cx) {
+    this.show(note);
+    this.editLine(index, cx, "end");
+  }
+
+  openSend(i, cx) {
+    const note = this.current();
+    const text = stripMarkup(this.liveText(i)).trim();
+    if (!note || !text) return;
+    this.commit(cx);
+    const here = focused();
+    const space = spaces().find((s) => s.id === here?.space) ?? spaces().find((s) => s.active);
+    if (!space) {
+      notify({ title: "No space open", body: "Open a space, then send the to-do.", level: "warning" });
+      return;
+    }
+    openOverlay({
+      mod: "apple-notes",
+      kind: "popup",
+      width: 280,
+      props: {
+        mode: "send",
+        space: space.id,
+        spaceName: space.name,
+        machine: space.machine,
+        folder: here?.cwd || space.folder || "",
+        text: taskPrompt(note, text),
+        taskName: text.replace(/\s+/g, " ").slice(0, 48),
+      },
+    });
   }
 
   addFolder(cx) {
@@ -782,6 +1131,7 @@ export default class AppleNotes extends View {
 
   render(cx) {
     const t = theme();
+    if ((props() ?? {}).mode === "send") return this.sendMenu(t);
     const dark = Boolean(settings().dark);
     const selectedBg = dark ? "#4a3c12" : "#f8e6a3";
     if (!this.data) {
@@ -838,29 +1188,13 @@ export default class AppleNotes extends View {
             }),
           ),
       )
-      .child(div().px(16).pb(3).text_size(10.5).font_semibold().text_color(t.dim).child("iCloud"))
+      .child(this.folderRow(t, dark, { id: "todo", name: "To-do", icon: "todo", count: this.openCount() }))
+      .child(div().px(16).pt(8).pb(3).text_size(10.5).font_semibold().text_color(t.dim).child("iCloud"))
       .child(
         v_flex()
           .gap(1)
           .children(
-            folders.map((f) => {
-              const here = this.folder === f.id;
-              return h_flex()
-                .id(`folder-${f.id}`)
-                .mx(8)
-                .px(9)
-                .h(28)
-                .gap(8)
-                .items_center()
-                .rounded(6)
-                .when(here, (el) => el.bg(dark ? t.selected : "#dcdcd8"))
-                .when(!here, (el) => el.hover((s) => s.bg(t.hover)))
-                .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                .on_click((_e, cx) => this.pickFolder(f.id, cx))
-                .child(svg(`${FOLDER}${f.id === "all" ? "notes" : "folder"}.svg`).size(14).flex_none().text_color(YELLOW))
-                .child(div().flex_1().truncate().text_size(12.5).child(f.name))
-                .child(div().text_size(10.5).text_color(t.dim).child(String(this.countIn(f.id))));
-            }),
+            folders.map((f) => this.folderRow(t, dark, { id: f.id, name: f.name, icon: f.id === "all" ? "notes" : "folder", count: this.countIn(f.id) })),
           ),
       )
       .when(this.creatingFolder, (el) =>
@@ -897,7 +1231,27 @@ export default class AppleNotes extends View {
       .child(div().flex_1());
   }
 
+  folderRow(t, dark, row) {
+    const here = this.folder === row.id;
+    return h_flex()
+      .id(`folder-${row.id}`)
+      .mx(8)
+      .px(9)
+      .h(28)
+      .gap(8)
+      .items_center()
+      .rounded(6)
+      .when(here, (el) => el.bg(dark ? t.selected : "#dcdcd8"))
+      .when(!here, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => this.pickFolder(row.id, cx))
+      .child(svg(`${FOLDER}${row.icon}.svg`).size(14).flex_none().text_color(YELLOW))
+      .child(div().flex_1().truncate().text_size(12.5).child(row.name))
+      .child(div().text_size(10.5).text_color(t.dim).child(String(row.count)));
+  }
+
   listColumn(t, notes, selectedBg) {
+    if (this.folder === "todo") return this.taskColumn(t);
     const folderName = this.folder === "all" ? "All Notes" : this.data.folders.find((f) => f.id === this.folder)?.name ?? "Notes";
     const groups = [];
     for (const n of notes) {
@@ -960,6 +1314,82 @@ export default class AppleNotes extends View {
             groups.flatMap((g) => [
               div().px(16).pt(12).pb(4).text_size(10.5).font_semibold().text_color(t.dim).child(g.name),
               ...g.notes.map((n) => this.noteRow(t, n, selectedBg)),
+            ]),
+          ),
+      );
+  }
+
+  taskColumn(t) {
+    const groups = this.taskGroups();
+    return v_flex()
+      .w(292)
+      .h_full()
+      .flex_none()
+      .bg(t.background)
+      .child(
+        h_flex()
+          .px(14)
+          .pt(12)
+          .pb(6)
+          .gap(6)
+          .items_center()
+          .child(div().flex_1().truncate().text_size(18).font_semibold().child("To-do"))
+          .child(this.iconButton("square-pen", 17, t.muted, (cx) => this.newNote(cx))),
+      )
+      .child(
+        h_flex()
+          .px(12)
+          .pb(8)
+          .items_center()
+          .child(
+            h_flex()
+              .flex_1()
+              .h(28)
+              .px(8)
+              .gap(6)
+              .items_center()
+              .rounded(7)
+              .bg(t.raised)
+              .child(svg(`${FOLDER}search.svg`).size(12).flex_none().text_color(t.dim))
+              .child(Input.new(this.search).flex_1().h_full().font_family(settings().ui_font_family).text_size(12).text_color(t.foreground)),
+          ),
+      )
+      .child(
+        v_flex()
+          .id("todo-list")
+          .flex_1()
+          .min_h(0)
+          .overflow_y_scrollbar()
+          .pb(10)
+          .when(groups.length === 0, (el) =>
+            el.child(
+              v_flex()
+                .pt(40)
+                .px(16)
+                .items_center()
+                .gap(6)
+                .child(svg(`${FOLDER}todo.svg`).size(28).text_color(t.dim))
+                .child(div().text_size(12).text_color(t.dim).child(this.filter.trim() ? "No Results" : "No open to-dos"))
+                .when(!this.filter.trim(), (box) => box.child(div().text_size(11).text_color(t.dim).child("Type [] in a note"))),
+            ),
+          )
+          .children(
+            groups.flatMap((g) => [
+              div().px(16).pt(12).pb(4).text_size(10.5).font_semibold().text_color(t.dim).truncate().child(titleOf(g.note)),
+              ...g.items.map((item) =>
+                v_flex()
+                  .id(`task-${g.note.id}-${item.index}`)
+                  .mx(8)
+                  .px(9)
+                  .py(7)
+                  .gap(2)
+                  .rounded(7)
+                  .hover((s) => s.bg(t.hover))
+                  .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                  .on_click((_e, cx) => this.openTask(g.note, item.index, cx))
+                  .child(div().text_size(13).truncate().child(item.text))
+                  .child(div().text_size(11).text_color(t.dim).truncate().child(titleOf(g.note))),
+              ),
             ]),
           ),
       );
@@ -1151,7 +1581,8 @@ export default class AppleNotes extends View {
         .when(Boolean(this.handles[b.id]), (el) => el.track_focus(this.handles[b.id]))
         .child(div().flex_1().h(1).rounded_full().bg(this.focused === i ? t.muted : t.border));
     }
-    const editing = this.focused === i && Boolean(this.lineStates[i]);
+    const codeEdit = this.focused === i && b.kind === "code" && Boolean(this.lineStates[i]);
+    const textEdit = this.focused === i && b.kind !== "code" && Boolean(this.handles[b.id]);
     return h_flex()
       .id(`line-${b.id}`)
       .w_full()
@@ -1162,6 +1593,13 @@ export default class AppleNotes extends View {
       .ml((b.indent || 0) * 18)
       .when(b.kind === "quote", (el) => el.pl(10).border_l(2).border_color(t.border))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_hover((hovered, cx) => {
+        if (b.kind !== "check") return;
+        const next = hovered ? b.id : null;
+        if (this.hoverLine === next || (!hovered && this.hoverLine !== b.id)) return;
+        this.hoverLine = next;
+        cx.notify();
+      })
       .on_click((_e, cx) => {
         cx.stop_propagation();
         this.editLine(i, cx);
@@ -1172,8 +1610,99 @@ export default class AppleNotes extends View {
           .flex_1()
           .min_w(0)
           .when(b.kind === "code", (el) => el.px(10).py(6).rounded(8).bg(t.raised))
-          .child(editing ? this.lineEditor(t, b, i) : this.lineView(t, b, solo)),
-      );
+          .child(codeEdit ? this.lineEditor(t, b, i) : textEdit ? this.lineField(t, b, i, solo) : this.lineView(t, b, solo)),
+      )
+      .when(b.kind === "check" && !!stripMarkup(b.text).trim() && this.hoverLine === b.id, (el) => el.child(this.sendButton(t, b, i)));
+  }
+
+  sendButton(t, b, i) {
+    return h_flex()
+      .id(`send-${b.id}`)
+      .w(22)
+      .h(22)
+      .mt(2)
+      .flex_none()
+      .items_center()
+      .justify_center()
+      .rounded(5)
+      .tooltip("Send to agent")
+      .hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.openSend(i, cx);
+      })
+      .child(svg(`${FOLDER}send.svg`).size(13).text_color(t.muted));
+  }
+
+  sendMenu(t) {
+    const spec = props() ?? {};
+    const here = agents().filter((a) => a.space === spec.space);
+    const row = (id, label, sub, dot, onPress) =>
+      h_flex()
+        .id(id)
+        .h(30)
+        .px(6)
+        .gap(8)
+        .items_center()
+        .rounded(6)
+        .hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          onPress();
+        })
+        .child(div().w(7).h(7).rounded_full().flex_none().bg(dot || t.accent))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).child(label))
+        .when(Boolean(sub), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(10.5).text_color(t.dim).child(sub)));
+    const safe = (s) => String(s ?? "").replace(/[^A-Za-z0-9_-]/g, "-");
+    const heading = (text) => div().px(6).pt(6).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(text);
+    return v_flex()
+      .id("send-menu")
+      .w_full()
+      .max_h(360)
+      .bg(t.popover)
+      .p(8)
+      .gap(2)
+      .text_size(13)
+      .text_color(t.foreground)
+      .overflow_y_scrollbar()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(div().px(6).pb(2).truncate().text_size(12).font_semibold().child(spec.spaceName || "This space"))
+      .child(heading("In this conversation"))
+      .when(here.length === 0, (el) => el.child(div().px(6).pb(4).text_size(12).text_color(t.muted).child("No agent in this space")))
+      .children(here.map((a) => row(`send-live-${safe(a.address)}`, a.program?.name || "Agent", a.title && a.title !== a.program?.name ? a.title : "", t[a.status] || t.idle, () => this.sendTo(a))))
+      .child(heading("New conversation"))
+      .when(!this.agentsReady, (el) => el.child(div().px(6).text_size(12).text_color(t.muted).child("Looking for agents…")))
+      .when(this.agentsReady && this.agentChoices.length === 0, (el) => el.child(div().px(6).text_size(12).text_color(t.muted).child("No agents installed")))
+      .children((this.agentChoices ?? []).map((agent, i) => row(`send-new-${safe(agent.key)}-${i}`, agent.name, "", t.accent, () => this.startAgent(agent))));
+  }
+
+  sendTo(agent) {
+    const spec = props() ?? {};
+    hc(["send", agent.address, spec.text])
+      .then((r) => {
+        if (r?.code) {
+          notify({ title: "Couldn't send", body: (r.stderr || r.stdout || "The agent didn't take the message.").trim(), level: "warning" });
+          return;
+        }
+        notify({ title: "Sent to the agent", body: agent.program?.name || "Agent", level: "success" });
+        if (spec.overlay) closeOverlay(spec.overlay);
+      })
+      .catch((e) => notify({ title: "Couldn't send", body: String(e?.message ?? e), level: "warning" }));
+  }
+
+  startAgent(agent) {
+    const spec = props() ?? {};
+    run("tab.new", {
+      space: spec.space,
+      ...(spec.folder ? { folder: spec.folder } : {}),
+      name: spec.taskName || agent.name,
+      argv: agent.run,
+      task: spec.text,
+    });
+    notify({ title: `Started ${agent.name}`, body: spec.taskName || "", level: "info" });
+    if (spec.overlay) closeOverlay(spec.overlay);
   }
 
   gutter(t, b, i, num) {
@@ -1203,6 +1732,45 @@ export default class AppleNotes extends View {
       return div().w(22).mt(2).flex_none().text_size(15).text_color(t.muted).child(`${num}.`);
     }
     return div().w(0).flex_none();
+  }
+
+  lineField(t, b, i, solo) {
+    const text = b.text;
+    const at = Math.max(0, Math.min(this.cursor ?? text.length, text.length));
+    const size = textSize(b.kind);
+    const handle = this.handles[b.id];
+    const paint = (el, dim) => {
+      el.font_family(uiFont()).text_size(size).text_color(dim ? t.dim : b.checked || b.kind === "quote" ? t.dim : t.foreground);
+      if (!dim && (b.kind === "h1" || b.kind === "h2" || b.kind === "h3")) el.font_semibold();
+      if (!dim && b.kind === "quote") el.italic();
+      if (!dim && b.checked) el.line_through();
+      return el;
+    };
+    const caret = div().w(1).h(Math.max(16, Math.round(size + 4))).flex_none().bg(t.foreground).loop("opacity", { from: 1, to: 0, period: 1100 });
+    const kids = [];
+    for (let n = 0; n < text.length; n++) {
+      if (n === at) kids.push(caret);
+      kids.push(paint(div().flex_none(), false).child(text[n] === " " ? "\u00a0" : text[n]));
+    }
+    if (at >= text.length) kids.push(caret);
+    if (!text) kids.push(paint(div().flex_none(), true).child(placeholderFor(b.kind, solo && b.kind === "p") || " "));
+    return h_flex()
+      .id(`edit-${b.id}`)
+      .w_full()
+      .min_w(0)
+      .min_h(b.kind === "h1" ? 36 : 26)
+      .flex_wrap()
+      .items_center()
+      .track_focus(handle)
+      .on_key_down((e, cx) => this.keyLine(i, e, cx))
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        const avg = Math.max(7, size * 0.52);
+        const x = e.local_position?.x ?? 0;
+        this.editLine(i, cx, Math.max(0, Math.min(text.length, Math.round(x / avg))));
+      })
+      .on_click((_e, cx) => cx.stop_propagation())
+      .children(kids);
   }
 
   lineEditor(t, b, i) {

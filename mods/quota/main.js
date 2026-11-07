@@ -12,7 +12,8 @@ import { appHome, exec, readTextFile, writeTextFile, theme, notify } from "herdr
 const CONFIG = () => `${appHome()}/data/9router-quota.json`;
 const JAR = () => `${appHome()}/data/9router-quota.cookies`;
 const PREFS = () => `${appHome()}/data/9router-quota-ui.json`;
-const POLL_MS = 5 * 60 * 1000; // quota moves slowly, and upstream calls are slow
+const CACHE = () => `${appHome()}/data/9router-quota-cache.json`;
+const MIN_GAP_MS = 30 * 1000; // a second click this soon only redraws: requests are rationed
 const RETRY_MS = 30 * 60 * 1000; // a connection with no usage API is asked again later
 
 // Antigravity reports one row per model and four rolled-up buckets; the
@@ -106,9 +107,14 @@ function group(connection, data) {
 // "Usage not available" is noise: the panel shows what there is to see.
 const shows = (g) => g.quotas.length > 0 || Boolean(g.error) || (Boolean(g.message) && !/not available/i.test(g.message));
 
+// The panel can open on a snapshot from days ago, so past an hour it counts in
+// hours and then days.
 const ago = (at) => {
   const minutes = Math.round((Date.now() - at) / 60000);
-  return minutes < 1 ? "now" : `${minutes}m`;
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`;
 };
 
 // Remaining quota, in three bands: above 80% is comfortable (green), 31-80%
@@ -193,7 +199,10 @@ export default class Quota extends View {
       if (key !== "search") state.on("submit", (_e, cx) => this.save(cx));
     }
 
-    cx.timer.every(POLL_MS, (cx) => this.refresh(cx, false));
+    // No background poll and no load on open: every refresh is a request to the
+    // 9Router server (a login plus one call per account), and the dashboard
+    // rate-limits them. The panel opens on the last snapshot on disk and asks
+    // the server only when the refresh button is pressed.
     // The "updated … ago" tooltip and the reset countdowns only move on a redraw.
     cx.timer.every(30000, (cx) => { if (this.updated > 0 && !this.setup) cx.notify(); });
     cx.spawn(async (cx) => {
@@ -216,7 +225,10 @@ export default class Quota extends View {
       }
       if (this.config?.url) this.urlInput.set_value(this.config.url);
       this.setup = !this.config?.url || !this.config?.password;
-      if (!this.setup) await this.refresh(cx, true);
+      if (!this.setup) {
+        this.cacheRaw = await readTextFile(CACHE()).catch(() => null);
+        if (this.cacheRaw) this.loadCache(this.cacheRaw);
+      }
       cx.notify();
     });
   }
@@ -290,6 +302,7 @@ export default class Quota extends View {
         this.alert(all);
         this.groups = all.sort((a, b) => rank(a) - rank(b));
         this.updated = Date.now();
+        this.saveCache(this.groups);
         this.error = "";
       } catch (e) {
         this.error = String(e?.message ?? e);
@@ -301,6 +314,44 @@ export default class Quota extends View {
         }
       }
     });
+  }
+
+  // The snapshot is what the panel opens on, so it keeps the reset moments as
+  // absolute times: "resets in 3h" written yesterday would still read 3h.
+  saveCache(groups) {
+    const now = Date.now();
+    const text = JSON.stringify({
+      updated: now,
+      groups: groups.map((g) => ({ ...g, quotas: g.quotas.map((q) => ({ ...q, leftAt: q.left ? now + q.left : 0 })) })),
+    });
+    writeTextFile(CACHE(), text, this.cacheRaw).then(() => { this.cacheRaw = text; }).catch(() => {});
+  }
+
+  loadCache(text) {
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(data?.groups)) return;
+    const now = Date.now();
+    this.groups = data.groups.map((g) => ({
+      ...g,
+      quotas: (g.quotas ?? []).map((q) => ({ ...q, left: q.leftAt ? Math.max(0, q.leftAt - now) : 0 })),
+    }));
+    this.updated = Number(data.updated) || 0;
+  }
+
+  // The refresh button. Pressed twice in a row it would send the same login and
+  // per-account calls again, so a press right after a load only redraws.
+  clickRefresh(cx) {
+    if (this.loading) return;
+    if (this.updated > 0 && Date.now() - this.updated < MIN_GAP_MS) {
+      cx.notify();
+      return;
+    }
+    this.refresh(cx, !this.signedIn);
   }
 
   // The write is awaited, so the click's cx is gone by then: everything after
@@ -327,6 +378,9 @@ export default class Quota extends View {
         this.skip = {};
         this.groups = [];
         this.updated = 0;
+        // A new server means the old snapshot belongs to someone else's accounts.
+        await writeTextFile(CACHE(), "", this.cacheRaw).catch(() => {});
+        this.cacheRaw = "";
         this.setup = false;
         this.loading = false;
         this.refresh(cx, true);
@@ -503,7 +557,7 @@ export default class Quota extends View {
             (cx) => { this.anon = !this.anon; this.savePrefs(); cx.notify(); }))
           .child(this.iconButton(t, "quota-refresh", "mods/quota/refresh-cw.svg",
             this.loading ? "Refreshing…" : this.updated > 0 ? `Refresh · updated ${ago(this.updated) === "now" ? "just now" : `${ago(this.updated)} ago`}` : "Refresh",
-            this.loading ? t.accent : t.dim, (cx) => this.refresh(cx, true)))
+            this.loading ? t.accent : t.dim, (cx) => this.clickRefresh(cx)))
           .child(this.iconButton(t, "quota-settings", "mods/quota/settings.svg", "Server settings", t.dim,
             (cx) => { this.setup = true; this.error = ""; cx.notify(); }))))
       .when(ready && this.groups.length > 0, (el) => el.child(this.searchRow(t)))
@@ -604,7 +658,9 @@ export default class Quota extends View {
         .child(div().text_size(11).text_color(t.dim).child("Loading…")))
       .when(!this.error && !this.loading && !this.groups.length, (el) => el
         .child(div().w_full().text_size(11).line_height("16px").text_color(t.dim)
-          .child("No connected account reports quota. Kiro, Antigravity and Codex usually do.")))
+          .child(this.updated > 0
+            ? "No connected account reports quota. Kiro, Antigravity and Codex usually do."
+            : "Nothing loaded yet. Press refresh to read the accounts from the server.")))
       .when(this.groups.length > 0 && shown.length === 0, (el) => el
         .child(div().w_full().text_size(11).line_height("16px").text_color(t.dim)
           .child("No account matches the search or filter.")))

@@ -36,7 +36,8 @@ genz/
 │  ├─ quota/         helper: 9Router quota panel
 │  ├─ apple-notes/   helper: notes window
 │  ├─ insights/      helper: usage analytics tab
-│  └─ ssh-hosts/     helper: ssh config tab
+│  ├─ ssh-hosts/     helper: ssh config tab
+│  └─ pokemon-agents/ a strip where each agent roams as a pixel Pokémon
 ├─ RECIPE.md                    a brief another agent can build the layout from
 └─ preview.png
 ```
