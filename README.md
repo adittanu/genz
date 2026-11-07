@@ -20,7 +20,7 @@
 - **One name per agent.** Tabs name themselves after the agent's session title and keep following it (never touching tabs you named), and the agent's card and Pokémon use that same name.
 - **Pane headers on hover.** The `Claude Code · folder` header with split, zoom and close shows only while the pointer is on the pane.
 - **Tool buttons.** Files, Changes, Quota, SSH, Insights and Poké Ball folded behind one chevron (only the ones that are on show until you unfold them).
-- Photo header, bordered pane cards, status bar. Everything uses theme colors, so any Herdr theme works.
+- Photo header, bordered pane cards, and no status bar: the machine and branch sit in the corner of the Pokémon strip. Everything uses theme colors, so any Herdr theme works.
 
 ## What's in this repo
 
@@ -46,7 +46,7 @@ genz/
 └─ preview.png
 ```
 
-It also uses shipped Herdr mods (`pane`, `files`, `changes`, `workspace-status`, `workspace-chrome`, `menu`, `new-menu`, `worktree`, `toast`, `machine-add`), which every Herdr install already has.
+It also uses shipped Herdr mods (`pane`, `files`, `changes`, `workspace-chrome`, `menu`, `new-menu`, `worktree`, `toast`, `machine-add`), which every Herdr install already has.
 
 ## Install
 

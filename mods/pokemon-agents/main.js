@@ -464,13 +464,26 @@ export default class PokemonAgents extends View {
           .child("×")));
   }
 
-  // The folded strip: one row with a Poké Ball, how many agents are out, and Show.
+  // genz: where the active space runs (machine, branch). It took the place of the status bar under the strip.
+  whereInfo(t) {
+    const space = spaces().find((s) => s.active);
+    return h_flex().h(20).gap(6).flex_none().items_center().text_size(11).text_color(t.muted)
+      .child(svg(`mods/workspace-chrome/${space?.machine ? "server" : "monitor"}.svg`).size(12).flex_none())
+      .child(div().flex_none().child(space?.machine ?? "This computer"))
+      .when(Boolean(space?.branch), (el) => el
+        .child(div().flex_none().text_color(t.dim).child("·"))
+        .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none())
+        .child(div().min_w(0).truncate().child(space.branch)));
+  }
+
+  // The folded strip: one row with where the space runs, a Poké Ball, how many agents are out, and Show.
   renderBar(cx) {
     const t = theme();
     const list = agents();
     const calling = list.filter((a) => a.status === "blocked").length;
     return h_flex().id("pokemon-bar").size_full().px(10).gap(8).items_center().bg(t.chrome)
       .border_t(1).border_color(t.border)
+      .child(this.whereInfo(t).mr(8))
       .child(svg("mods/pokemon-agents/pokeball.svg").size(13).text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted)
         .child(list.length ? `Pokémon · ${list.length} agent${list.length === 1 ? "" : "s"}` : "Pokémon"))
@@ -507,13 +520,16 @@ export default class PokemonAgents extends View {
       .child(div().absolute().left(0).right(0).top(ground + 4).h(1).bg(t.border));
     // Drawn last (below) so it sits above the Pokémon.
     const fold = h_flex().absolute().top(6).right(8).gap(6).child(this.petButton(t)).child(this.foldButton(false, t));
+    // genz: machine and branch at the top left, across from Pet / Hide (the strip has no status bar under it).
+    const where = div().absolute().top(6).left(8).px(6).rounded(5).bg(t.chrome).max_w(Math.max(120, this.width - 170))
+      .child(this.whereInfo(t));
 
     if (list.length === 0) {
       return root.child(
         div().absolute().inset_0().flex().items_center().justify_center()
           .text_size(12).text_color(t.dim)
           .child("No agents yet. Each agent you start shows up here as a Pokémon."),
-      ).child(fold);
+      ).child(where).child(fold);
     }
     if (this.magick === false) {
       root.child(
@@ -616,7 +632,7 @@ export default class PokemonAgents extends View {
           )),
       );
     }
-    return root.child(fold);
+    return root.child(where).child(fold);
   }
 
   // ---- the picker (opened as a dialog with props { picker, slot, current, tag }) ----
