@@ -12,7 +12,7 @@ const SLOT = 128; // width of one Pokémon's column (sprite + name tag)
 const LABEL_H = 18; // name tag under the feet
 const FEET = 24; // ground line, px above the strip's bottom
 const SPEED = { working: 70, idle: 32 }; // px per second
-const SLEEP_AFTER = 3 * 60 * 1000; // idle this long: fall asleep
+const SLEEP_AFTER = 30 * 1000; // idle this long: fall asleep
 const BAR_H = 26; // the strip folded down to one slim row
 const FOLDED = "folded"; // localStorage: "1" while folded
 const OPEN_H = "open-height"; // localStorage: the strip's height before it folded
@@ -314,7 +314,6 @@ export default class PokemonAgents extends View {
       this.magick = !!(await imageMagick());
       cx.notify();
     });
-    let ticks = 0;
     cx.timer.every(1000, (cx) => {
       // Called back from the strip (or the shortcut): go away.
       if (!petOut()) { closeOverlay(props().overlay); return; }
@@ -322,8 +321,9 @@ export default class PokemonAgents extends View {
       const a = petAgent(list);
       if (this.magick) this.want(a ? assign(list).ids[a.address] : 25, cx);
       // Agents changing redraws the pet by itself (every redraw repaints the whole window, so
-      // no polling); this only catches it dozing off after a quiet spell.
-      if (++ticks % 15 === 0) cx.notify();
+      // no polling). Dozing off is the one change only time makes: redraw just for that.
+      const mood = a ? moodOf(a, tabsById(), Date.now()) : "sleep";
+      if (mood !== this.mood) cx.notify();
     });
   }
 
@@ -335,6 +335,7 @@ export default class PokemonAgents extends View {
     const tabs = tabsById();
     const id = a ? assign(list).ids[a.address] : 25; // no agents: Pikachu keeps you company
     const mood = a ? moodOf(a, tabs, Date.now()) : "sleep";
+    this.mood = mood;
     const meta = this.sprites[id];
     const calling = list.filter((x) => x.status === "blocked").length;
     const go = () => a && (a.pane ? run("pane.focus", { pane: a.pane }) : run("agent.focus", { terminal: a.address }));
