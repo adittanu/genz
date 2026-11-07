@@ -181,6 +181,13 @@ export default class Tabs extends View {
       .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click(showInsights)
       .child(svg("mods/insights/insights.svg").size(14)).child("Insights");
+    // Pokémon strip: shows or hides the pokemon-agents block, when this layout has one.
+    const mons = find(root, "pokemon-agents"), monsOn = mons && !mons.hidden;
+    const monsButton = div().id("toggle-pokemon").size(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .bg(monsOn ? t.selected : t.chrome).text_color(monsOn ? t.foreground : t.muted)
+      .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
+      .on_click(() => run("layout.toggle", { id: "pokemon-agents" }))
+      .child(svg("mods/pokemon-agents/pokeball.svg").size(14));
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
@@ -191,6 +198,7 @@ export default class Tabs extends View {
       .child(panelButton("quota", "Quota", "mods/quota/gauge.svg"))
       .child(sshButton)
       .child(insightsButton)
+      .when(Boolean(mons), el => el.child(monsButton))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/genz-tabs/win-min.svg").size(16) : "âˆ’", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/genz-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "â–¡", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/genz-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

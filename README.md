@@ -37,7 +37,7 @@ genz/
 │  ├─ apple-notes/   helper: notes window
 │  ├─ insights/      helper: usage analytics tab
 │  ├─ ssh-hosts/     helper: ssh config tab
-│  └─ pokemon-agents/ a strip where each agent roams as a pixel Pokémon
+│  └─ pokemon-agents/ a strip where each agent roams as a pixel Pokémon (Poké Ball button or ctrl-shift-y hides it)
 ├─ RECIPE.md                    a brief another agent can build the layout from
 └─ preview.png
 ```

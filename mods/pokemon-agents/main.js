@@ -3,7 +3,7 @@
 // Click one to go to its agent; right-click to choose which of the first 151 it is.
 import { View, div, image } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand } from "herdr";
+import { agents, spaces, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand, layout } from "herdr";
 import { NAMES, COUNT, nameOf, dexNo } from "./names.js";
 import { loadSprite, ensureIcons, iconPath, imageMagick } from "./sprites.js";
 
@@ -17,6 +17,16 @@ const SLEEP_AFTER = 3 * 60 * 1000; // idle this long: fall asleep
 // ---- who is which Pokémon -------------------------------------------------------
 
 const slotOf = (a) => a.pane || a.address;
+
+function findNode(node, id) {
+  if (!node) return null;
+  if (node.id === id) return node;
+  for (const c of node.children ?? []) {
+    const hit = findNode(c, id);
+    if (hit) return hit;
+  }
+  return null;
+}
 
 function savedPicks() {
   const s = shared(KEY);
@@ -140,6 +150,7 @@ export default class PokemonAgents extends View {
   }
 
   tick(cx) {
+    if (findNode(layout(), "pokemon-agents")?.hidden) return; // hidden strip: no walking, no sprite loads
     const now = Date.now();
     const list = agents();
     const tabs = tabsById();
