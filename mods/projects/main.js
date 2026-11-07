@@ -20,7 +20,7 @@
 
 import { View, div } from "gpui-kit";
 import { agents, closeOverlay, exec, focused, nextCommand, notify, openOverlay, panes, pickFolder, run, spaces, watchFolder } from "herdr";
-import { apply, bases, basesAge, capture, checkedOut, checkout, checkoutAge, knownData, mru, ownerNow, peekBases, peekCheckout, dir, expand, freeId, git, gitr, load, make, owner, place, spaceFor, tilde, track, until, update, used, viaLogin, watchDir, worktree } from "./lib.js";
+import { apply, bases, basesAge, capture, checkedOut, checkout, checkoutAge, knownData, mru, ownerNow, peekBases, peekCheckout, dir, expand, freeId, git, gitr, load, make, owner, place, slash, spaceFor, tilde, track, until, update, used, viaLogin, watchDir, worktree } from "./lib.js";
 import { agentRun, branchName, claudeArgs, isAgent, tempBranch, titleOf } from "./agent.js";
 import { mkdirp } from "./os.js";
 
@@ -274,7 +274,10 @@ async function addSpace(id) {
   return add(o ? expand(o.project.folder) : place(s), s.machine ?? null);
 }
 
-const inside = (p, root) => !!p && (p === root || p.startsWith(root + "/"));
+const inside = (p, root) => {
+  p = slash(p); root = slash(root);
+  return !!p && (p === root || p.startsWith(root + "/"));
+};
 
 /** An agent terminal's folder and checkout: { addr, on, cwd, top, main, linked, branch }; top null outside git,
  *  main the repo's main checkout, linked: top is another of its worktrees. Null without a pane. */
@@ -282,8 +285,9 @@ async function agentAt(addr, cached = false) {
   const p = panes().find((x) => x.terminal === addr);
   if (!p?.cwd) return null;
   const on = spaces().find((s) => s.tabs.some((t) => t.id === p.tab))?.machine ?? null;
-  const hit = cached ? peekCheckout(p.cwd, on) : undefined, co = hit === undefined ? await checkout(p.cwd, on) : hit;
-  return { addr, on, cwd: p.cwd, top: co?.top ?? null, main: co?.main ?? null, linked: !!co?.linked, branch: co?.branch ?? null };
+  const cwd = slash(p.cwd);
+  const hit = cached ? peekCheckout(cwd, on) : undefined, co = hit === undefined ? await checkout(cwd, on) : hit;
+  return { addr, on, cwd, top: co?.top ?? null, main: co?.main ?? null, linked: !!co?.linked, branch: co?.branch ?? null };
 }
 
 /** Uncommitted changes in a's checkout: a count, or null when git fails. */

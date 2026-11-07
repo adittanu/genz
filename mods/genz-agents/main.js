@@ -27,15 +27,20 @@ function toggleSidebar() {
 
 // personal: project agents titled by project, with a branch line under the task. Projects from the projects mod's projects.json, colored as its + menu does.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
-const expand = (p) => (p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
-const inside = (p, root) => !!p && (p === root || p.startsWith(root + "/"));
+// genz: folders compared with slashes: Herdr's are D:\x on Windows (cwd, saved projects), git's D:/x.
+const slash = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
+const expand = (p) => slash(p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
+const inside = (p, root) => {
+  p = slash(p); root = slash(root);
+  return !!p && (p === root || p.startsWith(root + "/"));
+};
 async function git(cwd, args, on = null) {
   try { const r = await exec("git", args, { cwd, ...(on ? { on } : {}) }); return r.code === 0 ? r.stdout.trim() : null; } catch { return null; }
 }
 const machineOf = (address) => (address.includes("/") ? address.split("/")[0] : null);
 function hue(p, ids) {
   const root = expand(p.folder), ps = panes();
-  const place = (s) => { const tabs = new Set(s.tabs.map((t) => t.id)); return ps.find((x) => tabs.has(x.tab) && x.cwd)?.cwd || s.folder; };
+  const place = (s) => { const tabs = new Set(s.tabs.map((t) => t.id)); return slash(ps.find((x) => tabs.has(x.tab) && x.cwd)?.cwd || s.folder); };
   const near = spaces().filter((s) => (s.machine ?? null) === (p.machine ?? null) && inside(place(s), root));
   const s = near.find((x) => place(x) === root) ?? near[0];
   const c = s && shared("space.colors")?.[s.id];
@@ -294,7 +299,7 @@ export default class Agents extends View {
         const common = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], on);
         const top = common && (await git(cwd, ["rev-parse", "--show-toplevel"], on));
         const main = common?.replace(/\/\.git$/, "");
-        this.checkouts.set(key, top ? { main, linked: top !== main } : null);
+        this.checkouts.set(key, top ? { main, linked: top.replace(/\/+$/, "") !== main } : null);
       }
       localStorage.setItem("checkouts", JSON.stringify([...this.checkouts].slice(-200)));
       this.looking = false;
@@ -311,11 +316,12 @@ export default class Agents extends View {
     if (!this.checkouts.has(key)) { this.want.add(key); return null; }
     const c = this.checkouts.get(key);
     const local = (f) => (on ? f : expand(f));
-    const p = this.projects.find((x) => (x.machine ?? null) === on && (c ? local(x.folder) === c.main : inside(cwd, local(x.folder))));
+    const p = this.projects.find((x) => (x.machine ?? null) === on && (c ? slash(local(x.folder)) === c.main : inside(cwd, local(x.folder))));
     if (!p) return null;
     if (!c) return { p, branch: null, linked: false };
-    const co = globalThis.__wranglerProjects?.memo.get(`co|${on ?? ""}|${cwd}`)?.v;
-    return { p, branch: co?.branch || pane.branch || cwd.split("/").pop(), linked: c.linked };
+    // The projects host keys its checkouts by the folder with slashes.
+    const co = globalThis.__wranglerProjects?.memo.get(`co|${on ?? ""}|${slash(cwd)}`)?.v;
+    return { p, branch: co?.branch || pane.branch || cwd.split(/[\\/]/).filter(Boolean).pop(), linked: c.linked };
   }
 
   // personal: an agent on another machine: a server icon, its name on hover.

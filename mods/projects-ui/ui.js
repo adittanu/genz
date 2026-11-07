@@ -14,12 +14,17 @@ const peek = (key) => C()?.memo.get(key)?.v;
 /** Agent addresses, most recently focused first (kept by the host). */
 export const mru = () => C()?.mru ?? [];
 
-export const expand = (p) => (p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
-export const tilde = (p) => (p === home() || p?.startsWith(home() + "/") ? "~" + p.slice(home().length) : p);
-const base = (p) => p.replace(/\/+$/, "").split("/").pop();
+// genz: folders spelled with slashes, as the host keys and compares them (Herdr's are D:\x on Windows, git's D:/x).
+const slash = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
+export const expand = (p) => slash(p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
+export const tilde = (p) => {
+  const h = slash(home()), q = slash(p);
+  return q === h || q?.startsWith(h + "/") ? "~" + q.slice(h.length) : q;
+};
+const base = (p) => (p ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
 
 /** A folder's cached checkout { top, main, linked, branch } (null outside git), undefined when not read yet. */
-export const checkoutOf = (cwd, on = null) => peek(`co|${on ?? ""}|${cwd}`);
+export const checkoutOf = (cwd, on = null) => peek(`co|${on ?? ""}|${slash(cwd)}`);
 /** A project's cached bases (see the host's bases()), undefined when not read yet. */
 export const basesOf = (project, src) => peek(`bases|${project.machine ?? ""}|${expand(project.folder)}|${src ?? ""}`);
 
@@ -34,10 +39,13 @@ export function headed(b) {
 /** Where a space is now: its first terminal's live folder, else where it was made. */
 export function place(s, ps = panes()) {
   const tabs = new Set((s.tabs ?? []).map((t) => t.id));
-  return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+  return slash(ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder);
 }
 
-const inside = (p, root) => !!p && (p === root || p.startsWith(root + "/"));
+const inside = (p, root) => {
+  p = slash(p); root = slash(root);
+  return !!p && (p === root || p.startsWith(root + "/"));
+};
 
 /** The open space shown for a project: one at its folder, else one inside it. */
 export function shownSpace(project, sp = spaces(), ps = panes()) {

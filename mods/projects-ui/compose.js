@@ -6,7 +6,7 @@ import { Dropdown, ICON, ago, badge, basesOf, closeSelf, follow, headed, hints, 
 import { button, field, ghost, head, note, progress, stepOf } from "./dialog.js";
 
 const leaves = (n) => (n.split ? n.children.flatMap(leaves) : [n.pane]);
-const agentLeaf = (layout, key) => (layout?.tabs ?? []).some((t) => leaves(t.root).some((p) => p.argv?.[0]?.split("/").pop() === key));
+const agentLeaf = (layout, key) => (layout?.tabs ?? []).some((t) => leaves(t.root).some((p) => p.argv?.[0]?.split(/[\\/]/).pop().replace(/\.exe$/i, "") === key));
 const CLAUDE = { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: false };
 // Fixed script; program names arrive as "$@", never as shell text.
 const FOUND = `exec "\${SHELL:-/bin/sh}" -lic 'for p; do command -v "$p" >/dev/null 2>&1 && printf "wr-ok:%s\\n" "$p"; done' sh "$@"`;

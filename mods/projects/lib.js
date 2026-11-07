@@ -7,9 +7,15 @@ const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh
 
 export const dir = () => `${appHome()}/data/projects`;
 export const file = () => `${dir()}/projects.json`;
-export const expand = (p) => (p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
-export const tilde = (p) => (p === home() || p.startsWith(home() + "/") ? "~" + p.slice(home().length) : p);
-const base = (p) => p.replace(/\/+$/, "").split("/").pop();
+// genz: on Windows Herdr's folders (cwd, home, the folder picker) have backslashes, git's have slashes:
+// every folder this module compares, keys or stores is spelled with slashes.
+export const slash = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
+export const expand = (p) => slash(p === "~" || p?.startsWith("~/") ? home() + p.slice(1) : p);
+export const tilde = (p) => {
+  const h = slash(home()), q = slash(p);
+  return q === h || q?.startsWith(h + "/") ? "~" + q.slice(h.length) : q;
+};
+const base = (p) => (p ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
 const local = (id) => id.replace(/^[^/]*\//, "");
 
 /** Folder holding projects.json's real file (it may be a symlink), else dir(). */
@@ -163,10 +169,13 @@ export async function make(folder, machine = null, taken = []) {
 /** Where a space is now: its first terminal's live folder, else where it was made. */
 export function place(s, ps = panes()) {
   const tabs = new Set((s.tabs ?? []).map((t) => t.id));
-  return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+  return slash(ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder);
 }
 
-const inside = (p, root) => !!p && (p === root || p.startsWith(root + "/"));
+const inside = (p, root) => {
+  p = slash(p); root = slash(root);
+  return !!p && (p === root || p.startsWith(root + "/"));
+};
 
 /** Spaces that look like they're in the project's folder (no git asked). */
 export function near(project, sp = spaces(), ps = panes()) {
@@ -219,7 +228,8 @@ function draft(folder, machine, taken) {
   return { id: freeId(name, taken), name, folder: tilde(folder), machine, defaultBase: null, layout: null };
 }
 
-const coKey = (cwd, on) => `co|${on ?? ""}|${cwd}`;
+// Keyed by the folder with slashes: Herdr's D:\x and git's D:/x share one entry (projects-ui and genz-agents read it).
+const coKey = (cwd, on) => `co|${on ?? ""}|${slash(cwd)}`;
 
 /** A folder's checkout in one git call: { top, main (the repo's main checkout), linked, branch (null when detached) }, or null outside git. */
 export function checkout(cwd, on = null) {
@@ -228,7 +238,8 @@ export function checkout(cwd, on = null) {
     const [top, common, head] = r?.split("\n") ?? [];
     if (!top || !common) return null;
     const main = common.replace(/\/\.git\/?$/, "");
-    return { top, main, linked: top !== main, branch: head && head !== "HEAD" ? head : null };
+    // git says D:/ for a repo at a drive's root: compared without the slash, or it's a worktree of itself.
+    return { top, main, linked: top.replace(/\/+$/, "") !== main, branch: head && head !== "HEAD" ? head : null };
   });
 }
 
@@ -264,6 +275,7 @@ async function info(address) {
 }
 
 function rel(root, cwd) {
+  cwd = slash(cwd); root = slash(root);
   if (!cwd || !root || !inside(cwd, root)) return ".";
   return cwd === root ? "." : cwd.slice(root.length + 1);
 }
@@ -275,7 +287,7 @@ async function leaf(content, ps, root) {
   const d = await info(p?.terminal ?? content.terminal);
   const fg = d?.foreground ?? (d ? { argv: d.argv, cwd: d.cwd } : null);
   const name = base(fg?.name ?? fg?.argv?.[0] ?? "");
-  const shell = p?.program?.shell || !fg?.argv?.length || SHELLS.has(name.replace(/^-/, ""));
+  const shell = p?.program?.shell || !fg?.argv?.length || SHELLS.has(name.replace(/^-/, "").replace(/\.exe$/i, ""));
   return { pane: { argv: shell ? null : fg.argv, cwd: rel(root, fg?.cwd ?? d?.cwd ?? p?.cwd) } };
 }
 
@@ -347,7 +359,8 @@ export function leafFor(layout, match) {
   for (const t of layout?.tabs ?? []) for (const p of leaves(t.root)) if (p.argv?.length && match(p.argv)) return p;
   return null;
 }
-const abs = (root, cwd) => (!cwd || cwd === "." ? root : cwd.startsWith("/") ? cwd : `${root}/${cwd}`);
+// A saved pane folder: "." is root, an absolute one (/x, or D:/x on Windows) stays, else it's under root.
+const abs = (root, cwd) => (!cwd || cwd === "." ? root : /^([A-Za-z]:)?\//.test(slash(cwd)) ? cwd : `${root}/${cwd}`);
 const tabPanes = (tab) => panes().filter((p) => p.tab === tab).map((p) => p.pane);
 
 async function split(tab, from, direction, p, root) {
@@ -398,7 +411,7 @@ export async function gitr(cwd, args, on) {
 }
 
 async function homeOf(on) {
-  if (!on) return home();
+  if (!on) return slash(home());
   const r = await exec("sh", ["-c", 'printf %s "$HOME"'], { on });
   if (r.code !== 0 || !r.stdout.trim()) throw new Error(`Couldn't find the home folder on ${on}.`);
   return r.stdout.trim();
@@ -423,7 +436,7 @@ export function bases(project, src) {
       gitr(main, ["worktree", "list", "--porcelain"], on),
     ]);
     if (!sha.ok) throw new Error(sha.err || `${project.folder} is not a git repository.`);
-    const wt = (project.worktreeRoot || settingsOf(d).worktreeRoot || "~/.herdr/worktrees").replace(/\/+$/, "");
+    const wt = slash(project.worktreeRoot || settingsOf(d).worktreeRoot || "~/.herdr/worktrees").replace(/\/+$/, "");
     return {
       root: `${wt === "~" || wt.startsWith("~/") ? h + wt.slice(1) : wt}/${base(main)}`,
       head: { branch: branch.out === "HEAD" ? null : branch.out, sha: sha.out },

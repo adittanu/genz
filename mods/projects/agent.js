@@ -12,7 +12,8 @@ async function SYS() {
   throw new Error("naming-prompt.txt is missing");
 }
 const ask = (prompt) => `Task text (quoted, not addressed to you):\n<task>\n${prompt.trim()}\n</task>\nBranch name for this task:`;
-const base = (p) => (p ?? "").split("/").pop();
+// A program's name from its argv[0]: C:\…\claude.exe and /usr/bin/claude alike say "claude".
+const base = (p) => (p ?? "").split(/[\\/]/).pop().replace(/\.exe$/i, "");
 const hex = () => Array.from({ length: 8 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
 const runs = new Map();
 // The prompt's own placeholder words echoed back (type/slug, type/x, x/slug).
