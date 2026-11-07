@@ -1009,8 +1009,15 @@ export default class Agents extends View {
     const items = [...settled.map((a) => ({ a })), ...this.parked.map((e) => ({ e }))];
     const shelf = () => {
       const open = this.settledOpen;
-      const shownRows = (this.settledMore ? items : items.slice(0, SETTLED_FIRST)).map((it) => (it.a ? slim(it.a) : pslim(it.e)));      const header = h_flex().id("settled-header").h(32).px(10).gap(7).flex_none().items_center().text_size(11.5).font_semibold().cursor_pointer()
+      const shownRows = (this.settledMore ? items : items.slice(0, SETTLED_FIRST)).map((it) => (it.a ? slim(it.a) : pslim(it.e)));
+      // genz: the park/auto pills show only while the header is hovered, so it reads like the other group headers.
+      const header = h_flex().id("settled-header").h(32).px(10).gap(7).flex_none().items_center().text_size(11.5).font_semibold().cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
+        .on_hover((on, cx) => {
+          if (this.settledHover === on) return;
+          this.settledHover = on;
+          cx.notify();
+        })
         .on_click((_e, cx) => {
           this.settledOpen = !this.settledOpen;
           localStorage.setItem("settled-open", String(this.settledOpen));
@@ -1021,7 +1028,7 @@ export default class Agents extends View {
         .child(div().flex_none().px(6).h(16).rounded(8).bg(t.hover).flex().items_center()
           .text_size(10.5).font_medium().text_color(t.dim).child(String(settled.length + this.parked.length)))
         .child(div().flex_1())
-        .child(div().id("park-days").flex_none().px(6).h(16).rounded(8).flex().items_center().text_size(10.5).font_medium()
+        .when(Boolean(this.settledHover), (el) => el.child(div().id("park-days").flex_none().px(6).h(16).rounded(8).flex().items_center().text_size(10.5).font_medium()
           .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .tooltip(park ? `Auto-settled agents are closed after ${park} day${park > 1 ? "s" : ""} and kept here to resume. Click to change.` : "Auto-settled agents stay running. Click to have them parked (closed, resumable) after some days.")
           .on_click((_e, cx) => {
@@ -1038,7 +1045,7 @@ export default class Agents extends View {
             setShared("agents.settleDays", SETTLE_CHOICES[(SETTLE_CHOICES.indexOf(days) + 1) % SETTLE_CHOICES.length]);
             cx.notify();
           })
-          .child(days ? `auto ${days}d` : "auto off"))
+          .child(days ? `auto ${days}d` : "auto off")))
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim));
       const more = h_flex().id("settled-more").px(8).h(24).flex_none().items_center().text_size(11.5).text_color(t.dim).cursor_pointer()
         .hover((s) => s.text_color(t.foreground))

@@ -93,9 +93,9 @@ Switch back any time with `ctrl-shift-l`. Remove it by deleting `layouts/genz.js
 | Hover a finished agent, press the archive icon | It is parked: closed (memory freed) and kept on the shelf to resume. An agent that can't be resumed shows the circle-check and is only settled. |
 | Click the shelf header | Fold or open the shelf (folded at first). |
 | Hover a settled row, press the undo arrow | Back in the list, idle clock restarted. |
-| Click `auto 3d` | Cycle the auto-settle time: 1d, 3d, 7d, 14d, off. |
+| Hover the shelf header, click `auto 3d` | Cycle the auto-settle time: 1d, 3d, 7d, 14d, off. (The `park` and `auto` pills show only while the header is hovered.) |
 | Hover a settled row, press the archive icon | **Park** it: the agent is closed (memory freed) and stays on the shelf, dimmed. |
-| Click `park off` | Cycle how long an auto-settled agent keeps running before it is parked: 1d, 7d, 14d, 30d, off. |
+| Hover the shelf header, click `park off` | Cycle how long an auto-settled agent keeps running before it is parked: 1d, 7d, 14d, 30d, off. |
 
 Parked agents are stored in the mod's localStorage (`parked`): title, agent, folder, space, time. Resume runs `claude --continue`, `kiro-cli chat --resume`, `opencode --continue`, `codebuddy --continue` or `codex resume --last`. When other agents (running or parked) share the same folder, "the latest session" could be someone else's, so it opens the agent's own picker instead (`claude --resume`, `kiro-cli chat --resume-picker`, `codebuddy --resume`, `codex resume`). Herdr does not expose session ids, so that is the best a layout can do. Agents on other machines and agents without a known resume command can't be parked. (`settled=<ms>:<turn>`), so it survives restarts of the window, ends with the terminal, and every Herdr client sees the same shelf. The auto-settle time is the shared key `agents.settleDays` (`0` = off). The code is in `mods/genz-agents/main.js` (look for `// genz:`).
 
@@ -117,7 +117,7 @@ Built on Herdr's `main` layout and shipped mods. The Settled idea follows T3 Cod
 **genz** adalah layout Herdr untuk yang menjalankan banyak agent. Sidebar-nya tenang, tanpa scrollbar, dengan daftar agent berbentuk kartu dan rak **Settled** ala T3 Code.
 
 - Arahkan kursor ke agent yang sudah selesai, klik ikon arsip: agent masuk ke rak **Settled** di bawah sidebar dan langsung di-**park** (terminalnya ditutup supaya RAM-nya lepas, sekitar 500 MB untuk Claude Code), lalu bisa dilanjutkan lagi dari rak. Agent yang tidak bisa dilanjutkan (di mesin lain, atau tanpa perintah resume) memakai ikon centang-lingkaran dan hanya di-settle.
-- Pil `park` di header rak mengatur kapan agent yang otomatis di-settle ditutup: 1d, 7d, 14d, 30d, atau mati.
+- Pil `park` dan `auto` baru muncul saat kursor di atas header rak. Pil `park` mengatur kapan agent yang otomatis di-settle ditutup: 1d, 7d, 14d, 30d, atau mati.
 - Agent yang **idle 3 hari** (default) otomatis masuk Settled. Klik pil `auto 3d` di header rak untuk ganti: 1d, 3d, 7d, 14d, atau mati.
 - Agent keluar dari Settled sendiri kalau bekerja lagi, butuh kamu, atau menyelesaikan giliran baru.
 - Lama idle dihitung dari stempel waktu core (`status_ms`), jadi agent yang sudah idle seminggu sebelum layout dipasang tetap terhitung seminggu.
