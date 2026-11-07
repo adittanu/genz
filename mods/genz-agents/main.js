@@ -96,7 +96,9 @@ const RESUME = [
   { re: /codex/i, exe: "codex", cont: ["resume", "--last"], pick: ["resume"] },
 ];
 const specOf = (x) => RESUME.find((r) => r.re.test(`${x.app ?? ""} ${x.key ?? x.program?.key ?? ""} ${x.name ?? x.program?.name ?? ""}`));
-const PARK_CHOICES = [0, 7, 14, 30];
+// Parkable: a local agent we have a resume command for (park() also needs its folder).
+const canPark = (a) => Boolean(specOf(a)) && !a.address.includes("/");
+const PARK_CHOICES = [0, 1, 7, 14, 30];
 const parkDays = () => { const d = shared("agents.parkDays"); return Number.isFinite(d) && d >= 0 ? d : 0; };
 const sameDir = (a, b) => Boolean(a && b) && a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
 // personal: Claude's own sub-agents (Agent tool), from the files projects/hooks/subagents.sh keeps per terminal.
@@ -414,7 +416,7 @@ export default class Agents extends View {
   // genz: Park. Writes down how to start the agent again, then closes its pane. False when it can't be resumed (an
   // agent we have no resume command for, one on another machine, or no folder known).
   park(a, title) {
-    if (!specOf(a) || a.address.includes("/")) return false;
+    if (!canPark(a)) return false;
     const cwd = panes().find((p) => p.pane === a.pane)?.cwd || spaces().find((s) => s.id === a.space)?.folder;
     if (!cwd) return false;
     this.parked = [{
@@ -715,26 +717,31 @@ export default class Agents extends View {
         cx.notify();
       })
       .child(svg("mods/workspace-chrome/x.svg").size(14));
-    // genz: put a finished agent away on the Settled shelf.
-    const settler = (a) => div()
-      .id(`settle-${a.address}`)
-      .flex_none()
-      .size(24)
-      .flex()
-      .items_center()
-      .justify_center()
-      .rounded(6)
-      .text_color(t.dim)
-      .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.done))
-      .tooltip("Settle")
-      .on_click((_e, cx) => {
-        cx.stop_propagation();
-        this.settle(a, term, cx);
-        this.hovered = null;
-        cx.notify();
-      })
-      .child(svg("mods/workspace-chrome/circle-check.svg").size(14));
+    // genz: put a finished agent away. Settling alone keeps it running (and its memory, ~500 MB for a Claude Code),
+    // so an agent we can start again is parked right away: its terminal closes and the shelf keeps how to resume it.
+    // One we can't resume (no resume command, another machine) is only settled.
+    const settler = (a) => {
+      const parks = canPark(a);
+      return div()
+        .id(`settle-${a.address}`)
+        .flex_none()
+        .size(24)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(6)
+        .text_color(t.dim)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.done))
+        .tooltip(parks ? "Settle and park: close it to free its memory, resume it from the shelf" : "Settle")
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          if (!(parks && this.park(a, headOf(a)))) this.settle(a, term, cx);
+          this.hovered = null;
+          cx.notify();
+        })
+        .child(svg(`mods/workspace-chrome/${parks ? "archive" : "circle-check"}.svg`).size(14));
+    };
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
       // An agent on another machine (`vps/t7`) says which.
@@ -957,7 +964,7 @@ export default class Agents extends View {
           .child(pic ?? svg("mods/genz-agents/bot.svg").size(14).flex_none().text_color(t.dim)))
         .child(div().id(`stt-${a.address}`).flex_1().min_w(0).truncate().text_size(12.5)
           .text_color(a.focused ? t.foreground : t.muted).tooltip(headOf(a)).child(headOf(a)))
-        .when(hov, (el) => el.child(undo).when(Boolean(specOf(a)) && !a.address.includes("/"), (e) => e.child(parkBtn)).child(closer(a)))
+        .when(hov, (el) => el.child(undo).when(canPark(a), (e) => e.child(parkBtn)).child(closer(a)))
         .when(!hov, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - this.settledAt(a, term)[0]))));
     };
     // genz: a parked agent: dim row, click resumes it in a new tab; hover offers Resume and Forget.
@@ -1005,7 +1012,7 @@ export default class Agents extends View {
         .child(div().flex_1())
         .child(div().id("park-days").flex_none().px(6).h(16).rounded(8).flex().items_center().text_size(10.5).font_medium()
           .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-          .tooltip(park ? `Settled agents are closed after ${park} days and kept here to resume. Click to change.` : "Settled agents stay running. Click to have them parked (closed, resumable) after some days.")
+          .tooltip(park ? `Auto-settled agents are closed after ${park} day${park > 1 ? "s" : ""} and kept here to resume. Click to change.` : "Auto-settled agents stay running. Click to have them parked (closed, resumable) after some days.")
           .on_click((_e, cx) => {
             cx.stop_propagation();
             setShared("agents.parkDays", PARK_CHOICES[(PARK_CHOICES.indexOf(park) + 1) % PARK_CHOICES.length]);
