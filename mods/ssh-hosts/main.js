@@ -1,23 +1,29 @@
-// SSH Hosts: a Termius-style host manager that lives in its own tab.
-// Left: groups. Middle: search + NEW HOST + a grid of host cards.
-// Right: the host form while adding or editing.
-// Single click selects a card, double click (or the play button) opens ssh in a new tab.
-// Hosts live in <appHome>/data/ssh-hosts.json.
+// SSH Hosts: a host manager that lives in its own tab.
+// Left: All / Recent / groups. Middle: search + a dense, keyboard-driven host list.
+// Right: the selected host (connect, split, copy, edit), the host form, or Import / Export.
+// Enter connects, Shift+Enter splits, double click connects. Hosts live in <appHome>/data/ssh-hosts.json.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { run, hc, exec, window, terminals, focused, shared, setShared, theme, appHome, home, readTextFile, writeTextFile, notify } from "herdr";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { run, hc, exec, window, terminals, focused, shared, setShared, theme, appHome, home, readTextFile, writeTextFile, notify, nextCommand, pickFolder } from "herdr";
 import { fromLiteTerm, mergeHosts, toLiteTerm } from "./liteterm.js";
 
 const ICON = (n) => `mods/ssh-hosts/${n}.svg`;
+const ROW_H = 54;
+const RECENT = "\u0000recent"; // the Recent view's group key; no real group can be named this
 const FIELDS = [
   ["label", "Label", "prod-api"],
-  ["host", "Address", "203.0.113.10"],
+  ["host", "Address", "203.0.113.10 or example.com"],
   ["user", "Username", "root"],
-  ["password", "Password (optional, saved as plain text)", ""],
+  ["password", "Password", "Typed for you when ssh asks"],
   ["port", "Port", "22"],
   ["group", "Group", "Production"],
-  ["identity", "Identity file (optional)", "~/.ssh/id_ed25519"],
+  ["identity", "Key file", "~/.ssh/id_ed25519"],
+];
+const AUTHS = [
+  ["default", "Default", "ssh uses your agent, ~/.ssh keys or ~/.ssh/config, and asks for a password if it needs one."],
+  ["password", "Password", "Saved as plain text in data/ssh-hosts.json and typed once when ssh asks for it."],
+  ["key", "Key file", "Passed to ssh with -i."],
 ];
 
 // Named hosts from ~/.ssh/config (no wildcard patterns).
@@ -50,9 +56,33 @@ function sshArgv(h) {
   argv.push(h.user ? `${h.user}@${h.host}` : h.host);
   return argv;
 }
+const shellLine = (argv) => argv.map((a) => (/^[\w@%+=:,./~-]+$/.test(a) ? a : `"${a.replace(/(["\\$`])/g, "\\$1")}"`)).join(" ");
 
 const target = (h) => (h.alias && !h.host ? h.alias : `${h.user ? h.user + "@" : ""}${h.host}${h.port && h.port !== "22" ? ":" + h.port : ""}`);
-const subtitle = (h) => ["ssh", h.user || (h.alias ? h.alias : ""), h.password ? "auto-login" : ""].filter(Boolean).join(", ");
+const authOf = (h) => (h.identity ? "key" : h.password ? "password" : "default");
+const expand = (p) => String(p ?? "").trim().replace(/^~(?=$|[\\/])/, home());
+
+function initials(text) {
+  const parts = String(text ?? "").split(/[\s._\-:@/]+/).filter(Boolean);
+  if (!parts.length) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function ago(ms, short) {
+  if (!ms) return short ? "" : "Never";
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return short ? "now" : "Just now";
+  const [n, unit] = s < 3600 ? [Math.floor(s / 60), "m"] : s < 86400 ? [Math.floor(s / 3600), "h"] : [Math.floor(s / 86400), "d"];
+  if (short) return n > 99 && unit === "d" ? `${Math.floor(n / 30)}mo` : `${n}${unit}`;
+  return `${n}${unit} ago`;
+}
+
+function hash(text) {
+  let x = 0;
+  for (const ch of String(text ?? "")) x = (x * 31 + ch.charCodeAt(0)) >>> 0;
+  return x;
+}
 
 // Dummy names are chosen from the host's place in the list, never from its real text.
 const DUMMY_LABELS = ["web-01", "db-primary", "api-edge", "cache-01", "worker-02", "mail-01", "git-01", "monitor", "bastion", "files-01", "staging-app", "backup-01", "queue-01", "search-01", "edge-01", "metrics"];
@@ -69,8 +99,6 @@ function dummyPick(list, index) {
 const dummyLabel = (index) => dummyPick(DUMMY_LABELS, index);
 const dummyUser = (index) => DUMMY_USERS[index % DUMMY_USERS.length];
 const dummyAddress = (index) => `10.${(index % 8) + 1}.${(index % 16) + 1}.${(index % 200) + 10}`;
-const dummyTarget = (index) => `${dummyUser(index)}@${dummyAddress(index)}`;
-const dummySubtitle = (index) => `ssh, ${dummyUser(index)}`;
 function dummyGroupName(hosts, name) {
   const names = [];
   for (const h of hosts) {
@@ -106,7 +134,7 @@ function parseAddresses(text) {
 // so the resolver's own address is not treated as the answer.
 async function resolveName(name) {
   try {
-    if (window().platform === "windows") {
+    if (window()?.platform === "windows") {
       const script = `foreach ($t in 'A','AAAA') { Resolve-DnsName -Name '${name}' -Type $t -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress } }`;
       const r = await exec("powershell", ["-NoProfile", "-NonInteractive", "-Command", script]);
       return parseAddresses(r.stdout);
@@ -120,59 +148,89 @@ async function resolveName(name) {
   }
 }
 
+// Our own data file ({ hosts: [...] }) can be imported too, not only LiteTerm's.
+function ownHosts(text) {
+  try {
+    const d = JSON.parse(text);
+    if (Array.isArray(d?.hosts) && d.hosts.length && d.hosts.every((h) => h && (h.host || h.alias))) return d.hosts.map((h) => ({ ...h }));
+  } catch {}
+  return null;
+}
+
+function store(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+function keep(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
 export default class SshHosts extends View {
   init(_props, cx) {
     this.hosts = [];
     this.raw = null; // file text as last read, for writeTextFile's check
     this.loaded = false;
     this.query = "";
-    this.group = null; // null = all hosts
+    this.group = null; // null = all hosts, RECENT, or a group name
     this.selected = null; // index into this.hosts
-    this.form = false;
-    this.transfer = false; // the Import / Export panel
+    this.sort = store("sort", "name"); // name | recent
+    this.panel = null; // null (details) | "form" | "transfer"
+    this.size = null;
+    this.lastClick = null; // { key, at } for double click on a row
+    this.undo = null; // { entry, index, id }
+    this.copied = null; // index whose command was just copied
+    this.error = "";
+    this.focusedField = null;
+    this.handle = cx.focus_handle();
+    this.scroll = VirtualListScrollHandle.new();
+
+    // Import / Export
     this.busy = false;
-    this.note = ""; // result line in the transfer panel
+    this.note = "";
     this.noteError = false;
     this.overwrite = null; // path the next Export may replace
-    this.editing = null; // index being edited, or null for a new host
-    this.values = {};
-    this.pathInput = InputState.new({ placeholder: "C:\\Users\\you\\Downloads\\liteterm-hosts.json", value: `${home()}/Downloads/liteterm-hosts.json` });
+    this.pathInput = this.field({ placeholder: "C:\\Users\\you\\Downloads\\liteterm-hosts.json", value: [home(), "Downloads", "liteterm-hosts.json"].join(this.sep()) }, "path", cx);
     this.pathInput.on("change", (_e, cx) => { this.overwrite = null; cx.notify(); });
-    this.pathInput.on("focus", (_e, cx) => { this.focusedField = "path"; cx.notify(); });
-    this.pathInput.on("blur", (_e, cx) => { if (this.focusedField === "path") this.focusedField = null; cx.notify(); });
     this.pathInput.on("submit", (_e, cx) => this.importFile(this.pathInput.value(), cx));
-    this.focusedField = null;
-    this.error = "";
-    this.handle = cx.focus_handle();
 
-    this.dns = new Map(); // hostname -> addresses, or null while that lookup is failing
+    // DNS: a typed domain also finds saved hosts on the same server.
+    this.dns = new Map(); // hostname -> addresses
     this.dnsPending = new Map();
     this.lookup = null; // { name, status: wait|loading|done|error, ips }
     this.lookupGen = 0;
     this.lookupWait = 0;
 
-    this.search = InputState.new({ placeholder: "Find a host or domain" });
-    this.search.on("change", (_e, cx) => { this.query = this.search.value(); this.scheduleLookup(cx); cx.notify(); });
-    this.search.on("focus", (_e, cx) => { this.focusedField = "search"; cx.notify(); });
-    this.search.on("blur", (_e, cx) => { if (this.focusedField === "search") this.focusedField = null; cx.notify(); });
-    this.search.on("submit", (_e, cx) => {
-      const first = this.filtered()[0];
-      if (first) this.connect(first.h, "tab", cx);
+    this.search = this.field({ placeholder: "Search label, address, user or group" }, "search", cx);
+    this.search.on("change", (_e, cx) => {
+      this.query = this.search.value();
+      this.scheduleLookup(cx);
+      const first = this.query.trim() ? this.filtered()[0] : null;
+      if (first) { this.selected = first.i; this.scroll.scroll_to_item(0); }
+      cx.notify();
+    });
+    this.search.on("submit", (e, cx) => {
+      const row = this.current() ?? this.filtered()[0];
+      if (row) this.connect(row.h, e?.shift ? "split" : "tab", cx);
     });
 
-    this.pending = []; // ssh terminals waiting for their password prompt
-    cx.timer.every(500, (cx) => this.tick(cx));
-
+    // Host form
+    this.editing = null; // index being edited, or null for a new host
+    this.values = {};
+    this.auth = "default";
+    this.showPassword = false;
+    this.errors = {};
     this.inputs = {};
+    const hidden = this.viewMode() !== "normal";
     for (const [key, , ph] of FIELDS) {
-      const s = InputState.new({ placeholder: ph });
-      if (key === "password" || (this.viewMode() !== "normal" && MASKED_FIELDS.includes(key))) s.set_masked(true);
-      s.on("change", (_e, cx) => { this.values[key] = s.value(); cx.notify(); });
-      s.on("focus", (_e, cx) => { this.focusedField = key; cx.notify(); });
-      s.on("blur", (_e, cx) => { if (this.focusedField === key) this.focusedField = null; cx.notify(); });
+      const s = this.field({ placeholder: ph }, key, cx);
+      if (key === "password" || (hidden && MASKED_FIELDS.includes(key))) s.set_masked(true);
+      s.on("change", (_e, cx) => { this.values[key] = s.value(); if (this.errors[key]) delete this.errors[key]; cx.notify(); });
       s.on("submit", (_e, cx) => this.save(cx));
       this.inputs[key] = s;
     }
+
+    this.pending = []; // ssh terminals waiting for their password prompt
+    cx.timer.every(500, (cx) => this.tick(cx));
+    cx.timer.every(60000, (cx) => cx.notify()); // "3m ago" labels
 
     cx.spawn(async (cx) => {
       this.raw = await readTextFile(this.file()).catch(() => null);
@@ -180,9 +238,25 @@ export default class SshHosts extends View {
       this.loaded = true;
       cx.notify();
     });
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "focus") this.search.focus();
+        cx.notify();
+      }
+    });
+    cx.timer.after(120, () => this.search.focus());
+  }
+
+  field(options, name, _cx) {
+    const s = InputState.new(options);
+    s.on("focus", (_e, cx) => { this.focusedField = name; cx.notify(); });
+    s.on("blur", (_e, cx) => { if (this.focusedField === name) this.focusedField = null; cx.notify(); });
+    return s;
   }
 
   file() { return `${appHome()}/data/ssh-hosts.json`; }
+  sep() { return window()?.platform === "windows" ? "\\" : "/"; }
 
   async persist() {
     const text = JSON.stringify({ hosts: this.hosts }, null, 2);
@@ -195,35 +269,47 @@ export default class SshHosts extends View {
     }
   }
 
+  saveLater(cx) {
+    cx.spawn(async (cx) => { await this.persist(); cx.notify(); });
+  }
+
+  // ---- data ----
+
   groups() {
     const m = new Map();
     for (const h of this.hosts) m.set(h.group || "Ungrouped", (m.get(h.group || "Ungrouped") ?? 0) + 1);
-    return [...m.entries()];
+    return [...m.entries()].sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
   }
 
+  recentCount() { return this.hosts.filter((h) => h.lastUsed).length; }
+
   filtered() {
-    const q = this.query.trim().toLowerCase();
+    const tokens = this.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const name = domainOf(this.query);
     const found = name && this.lookup?.name === name && this.lookup.status === "done" ? new Set(this.lookup.ips) : null;
-    return this.hosts
+    const recent = this.group === RECENT;
+    const rows = this.hosts
       .map((h, i) => ({ h, i }))
       .filter(({ h }) => {
-        const inGroup = this.group === null || (h.group || "Ungrouped") === this.group;
-        const text = !q || [h.label, h.host, h.user, h.group, h.alias].some((v) => (v ?? "").toLowerCase().includes(q));
         if (found && this.sharesAddress(h, found)) return true;
-        return inGroup && text;
+        const inGroup = this.group === null || (recent ? Boolean(h.lastUsed) : (h.group || "Ungrouped") === this.group);
+        const hay = [h.label, h.host, h.user, h.group, h.alias, h.port].map((v) => String(v ?? "").toLowerCase()).join(" ");
+        return inGroup && tokens.every((tok) => hay.includes(tok));
       })
       .map((row) => {
         const addr = (row.h.host || "").trim().toLowerCase();
         const byIp = Boolean(found && this.sharesAddress(row.h, found) && addr !== name);
-        let via = null;
-        if (byIp) {
-          via = `${name} is on this server`;
-          const group = row.h.group || "Ungrouped";
-          if (this.group !== null && group !== this.group) via += ` (${group})`;
-        }
-        return { ...row, via };
+        return { ...row, via: byIp ? `${name} is on this server` : null };
       });
+    const byName = (a, b) => String(a.h.label || target(a.h)).localeCompare(String(b.h.label || target(b.h)), undefined, { sensitivity: "base", numeric: true });
+    if (recent || this.sort === "recent") rows.sort((a, b) => (b.h.lastUsed ?? 0) - (a.h.lastUsed ?? 0) || byName(a, b));
+    else rows.sort(byName);
+    return rows;
+  }
+
+  current() {
+    if (this.selected === null) return null;
+    return this.filtered().find((r) => r.i === this.selected) ?? null;
   }
 
   sharesAddress(h, ips) {
@@ -277,21 +363,20 @@ export default class SshHosts extends View {
     });
   }
 
-  connect(h, place, cx) {
-    if (h.password) return this.autoLogin(h, place);
-    if (place === "split") run("pane.split", { direction: "right", argv: sshArgv(h) });
-    else run("tab.new", { name: this.sessionName(h), argv: sshArgv(h) });
-  }
+  // ---- actions ----
 
-  // A host with a saved password: open ssh as usual, find the terminal it started
-  // (the new, focused one), and type the password once when ssh asks for it.
-  // The first host-key question ("yes/no") is left to the person.
-  autoLogin(h, place, cx) {
-    const known = new Set(terminals().map((t) => t.address));
+  connect(h, place, cx) {
+    h.lastUsed = Date.now();
+    this.saveLater(cx);
+    const argv = sshArgv(h);
+    const known = h.password ? new Set(terminals().map((t) => t.address)) : null;
     const before = focused()?.terminal ?? null;
-    if (place === "split") run("pane.split", { direction: "right", argv: sshArgv(h) });
-    else run("tab.new", { name: this.sessionName(h), argv: sshArgv(h) });
-    this.pending.push({ known, before, address: null, password: h.password, started: Date.now(), busy: false, sent: false });
+    if (place === "split") run("pane.split", { direction: "right", argv });
+    else run("tab.new", { name: this.sessionName(h), argv });
+    // A saved password: find the terminal ssh started (the new, focused one) and type the
+    // password once when ssh asks for it. The first host-key question is left to the person.
+    if (h.password) this.pending.push({ known, before, address: null, password: h.password, started: Date.now(), busy: false });
+    cx.notify();
   }
 
   tick(cx) {
@@ -305,7 +390,7 @@ export default class SshHosts extends View {
         else continue;
       }
       p.busy = true;
-      cx.spawn(async (cx) => {
+      cx.spawn(async () => {
         try {
           const r = await hc(["read", p.address]);
           if (r.code !== 0) p.dead = true;
@@ -323,49 +408,144 @@ export default class SshHosts extends View {
     }
     this.pending = this.pending.filter((p) => !p.dead);
   }
-  edit(index, cx, preset) {
-    this.transfer = false;
-    this.form = true;
+
+  copyCommand(i, cx) {
+    const h = this.hosts[i];
+    if (!h) return;
+    cx.write_to_clipboard(shellLine(sshArgv(h)));
+    this.copied = i;
+    cx.timer.after(1600, (cx) => { if (this.copied === i) { this.copied = null; cx.notify(); } });
+    cx.notify();
+  }
+
+  select(i, cx, scroll) {
+    this.selected = i;
+    if (this.panel === "form") this.panel = null;
+    if (scroll) {
+      const at = this.filtered().findIndex((r) => r.i === i);
+      if (at >= 0) this.scroll.scroll_to_item(at);
+    }
+    cx.notify();
+  }
+
+  move(delta, cx) {
+    const rows = this.filtered();
+    if (!rows.length) return;
+    const at = rows.findIndex((r) => r.i === this.selected);
+    const next = at < 0 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, at + delta));
+    this.selected = rows[next].i;
+    this.scroll.scroll_to_item(next);
+    cx.notify();
+  }
+
+  rowClick(key, cx) {
+    const i = Number(key);
+    const now = Date.now();
+    const twice = this.lastClick && this.lastClick.key === key && now - this.lastClick.at < 450;
+    this.lastClick = twice ? null : { key, at: now };
+    this.handle.focus();
+    if (twice && this.hosts[i]) this.connect(this.hosts[i], "tab", cx);
+    else this.select(i, cx, false);
+  }
+
+  edit(index, cx, preset, focusKey) {
+    this.panel = "form";
     this.editing = index;
+    this.errors = {};
     this.error = "";
-    const h = preset ?? (index === null ? { group: this.group ?? "" } : this.hosts[index]);
+    this.showPassword = false;
+    this.inputs.password.set_masked(true);
+    const h = preset ?? (index === null ? { group: this.group && this.group !== RECENT ? this.group : "" } : this.hosts[index]);
     for (const [key] of FIELDS) {
       this.values[key] = h[key] ?? "";
       this.inputs[key].set_value(h[key] ?? "");
     }
+    this.auth = authOf(h);
     cx.notify();
-    cx.timer.after(80, () => this.inputs[preset ? "user" : "label"].focus());
+    cx.timer.after(80, () => this.inputs[focusKey ?? "label"].focus());
+  }
+
+  duplicate(i, cx) {
+    const h = this.hosts[i];
+    if (!h) return;
+    this.edit(null, cx, { ...h, host: h.host || h.alias, label: `${h.label || target(h)} copy` }, "label");
   }
 
   // The domain is not saved. Open the form with its name and address filled in.
   addResolved(ip, cx) {
     const name = domainOf(this.query) ?? "";
-    this.edit(null, cx, { label: name, host: ip, port: "22", group: this.group ?? "" });
+    this.edit(null, cx, { label: name, host: ip, port: "22", group: this.group && this.group !== RECENT ? this.group : "" }, "user");
+  }
+
+  closePanel(cx) {
+    this.panel = null;
+    this.errors = {};
+    this.error = "";
+    cx.notify();
+    cx.timer.after(30, () => this.handle.focus());
   }
 
   save(cx) {
     const v = this.values;
-    const alias = this.editing !== null ? this.hosts[this.editing].alias : undefined;
-    if (!v.host?.trim() && !alias) { this.error = "Address is required."; cx.notify(); return; }
-    if (v.port && !/^\d{1,5}$/.test(v.port.trim())) { this.error = "Port must be a number."; cx.notify(); return; }
-    // Keep what the form doesn't show (an imported password, authMethod, os).
-    const entry = this.editing !== null ? { ...this.hosts[this.editing] } : {};
+    const old = this.editing !== null ? this.hosts[this.editing] : null;
+    const alias = old?.alias;
+    const errors = {};
+    if (!v.host?.trim() && !alias) errors.host = "Enter an address or hostname.";
+    if (v.port?.trim() && !(/^\d{1,5}$/.test(v.port.trim()) && Number(v.port) > 0 && Number(v.port) < 65536)) errors.port = "Port must be a number from 1 to 65535.";
+    if (this.auth === "key" && !v.identity?.trim()) errors.identity = "Enter the path to a private key.";
+    if (this.auth === "password" && !v.password) errors.password = "Enter the password, or pick Default.";
+    this.errors = errors;
+    if (Object.keys(errors).length) {
+      cx.notify();
+      const first = ["host", "port", "password", "identity"].find((k) => errors[k]);
+      if (first) this.inputs[first].focus();
+      return;
+    }
+    // Keep what the form doesn't show (os, lastUsed, alias).
+    const entry = old ? { ...old } : {};
     for (const [key] of FIELDS) entry[key] = key === "password" ? (v[key] ?? "") : (v[key] ?? "").trim();
+    if (this.auth !== "password") delete entry.password;
+    if (this.auth !== "key") entry.identity = "";
+    if (this.auth === "default") delete entry.authMethod;
+    else entry.authMethod = this.auth;
     if (!entry.password) delete entry.password;
     if (alias) entry.alias = alias;
     if (!entry.label) entry.label = entry.host || alias;
     if (this.editing === null) { this.hosts.push(entry); this.selected = this.hosts.length - 1; }
-    else this.hosts[this.editing] = entry;
-    this.form = false;
-    cx.spawn(async (cx) => { await this.persist(); cx.notify(); });
+    else { this.hosts[this.editing] = entry; this.selected = this.editing; }
+    this.panel = null;
+    this.saveLater(cx);
+    const at = this.filtered().findIndex((r) => r.i === this.selected);
+    if (at >= 0) this.scroll.scroll_to_item(at);
     cx.notify();
+    cx.timer.after(30, () => this.handle.focus());
   }
 
   remove(index, cx) {
+    const entry = this.hosts[index];
+    if (!entry) return;
+    // Pick the neighbour in the visible order before the list shifts.
+    const rows = this.filtered();
+    const at = rows.findIndex((r) => r.i === index);
+    const next = rows[at + 1] ?? rows[at - 1] ?? null;
     this.hosts.splice(index, 1);
-    this.selected = null;
-    if (this.group !== null && !this.groups().some(([g]) => g === this.group)) this.group = null;
-    cx.spawn(async (cx) => { await this.persist(); cx.notify(); });
+    this.selected = next ? (next.i > index ? next.i - 1 : next.i) : null;
+    if (this.group !== null && this.group !== RECENT && !this.groups().some(([g]) => g === this.group)) this.group = null;
+    if (this.panel === "form") this.panel = null;
+    const id = Date.now();
+    this.undo = { entry, index, id };
+    cx.timer.after(8000, (cx) => { if (this.undo?.id === id) { this.undo = null; cx.notify(); } });
+    this.saveLater(cx);
+    cx.notify();
+  }
+
+  restore(cx) {
+    if (!this.undo) return;
+    const { entry, index } = this.undo;
+    this.hosts.splice(Math.min(index, this.hosts.length), 0, entry);
+    this.selected = this.hosts.indexOf(entry);
+    this.undo = null;
+    this.saveLater(cx);
     cx.notify();
   }
 
@@ -375,15 +555,136 @@ export default class SshHosts extends View {
       const have = new Set(this.hosts.map((h) => h.alias).filter(Boolean));
       const fresh = found.filter((f) => !have.has(f.alias));
       this.hosts.push(...fresh);
-      await this.persist();
-      notify({ title: "SSH hosts", body: fresh.length ? `Imported ${fresh.length} from ~/.ssh/config` : "Nothing new in ~/.ssh/config", level: "info" });
+      if (fresh.length) await this.persist();
+      this.note = fresh.length ? `Imported ${fresh.length} host${fresh.length === 1 ? "" : "s"} from ~/.ssh/config.` : found.length ? "Every host in ~/.ssh/config is already here." : "No named hosts in ~/.ssh/config.";
+      this.noteError = false;
+      // With the Import / Export panel shut, the result goes out as a toast instead.
+      if (this.panel !== "transfer") { notify({ title: "SSH hosts", body: this.note, level: "info" }); this.note = ""; }
+      cx.notify();
+    });
+  }
+
+  openTransfer(cx) {
+    this.panel = this.panel === "transfer" ? null : "transfer";
+    this.note = "";
+    this.noteError = false;
+    this.overwrite = null;
+    cx.notify();
+  }
+
+  importFile(path, cx) {
+    const p = expand(path);
+    if (!p) { this.note = "Enter the path of a .json file."; this.noteError = true; cx.notify(); return; }
+    this.busy = true;
+    this.note = "";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const text = await readTextFile(p);
+        if (text == null) throw new Error("There's no file at that path.");
+        let incoming;
+        try { incoming = fromLiteTerm(text); } catch (e) { incoming = ownHosts(text); if (!incoming) throw e; }
+        const { added, skipped } = mergeHosts(this.hosts, incoming);
+        this.hosts.push(...added);
+        if (added.length) await this.persist();
+        const s = (n) => (n === 1 ? "" : "s");
+        this.note = added.length
+          ? `Imported ${added.length} host${s(added.length)}${skipped ? `, skipped ${skipped} already saved` : ""}.`
+          : skipped ? `All ${skipped} host${s(skipped)} in that file are already saved.` : "That file has no hosts.";
+        this.noteError = false;
+      } catch (e) {
+        this.note = String(e?.message ?? e);
+        this.noteError = true;
+      }
+      this.busy = false;
+      cx.notify();
+    });
+  }
+
+  exportFile(path, cx) {
+    const p = expand(path);
+    if (!p) { this.note = "Enter where to save the .json file."; this.noteError = true; cx.notify(); return; }
+    this.busy = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const existing = await readTextFile(p).catch(() => null);
+        if (existing != null && this.overwrite !== p) {
+          this.overwrite = p;
+          this.note = "A file already exists there. Press Export again to replace it.";
+          this.noteError = true;
+        } else {
+          await writeTextFile(p, toLiteTerm(this.hosts), existing);
+          this.overwrite = null;
+          const withPw = this.hosts.filter((h) => h.password).length;
+          this.note = `Exported ${this.hosts.length} host${this.hosts.length === 1 ? "" : "s"}.${withPw ? ` ${withPw} include a plain-text password: keep the file private.` : ""}`;
+          this.noteError = false;
+        }
+      } catch (e) {
+        this.note = `Couldn't export: ${e?.message ?? e}`;
+        this.noteError = true;
+      }
+      this.busy = false;
+      cx.notify();
+    });
+  }
+
+  browse(cx) {
+    cx.spawn(async (cx) => {
+      const dir = await pickFolder({ prompt: "Use this folder" });
+      if (!dir) return;
+      const name = expand(this.pathInput.value()).split(/[\\/]/).pop() || "liteterm-hosts.json";
+      this.pathInput.set_value(`${dir.replace(/[\\/]$/, "")}${this.sep()}${/\.json$/i.test(name) ? name : "liteterm-hosts.json"}`);
+      this.overwrite = null;
       cx.notify();
     });
   }
 
   key(e, cx) {
-    if (e.key === "escape" && (this.form || this.transfer)) { this.form = false; this.transfer = false; this.error = ""; cx.stop_propagation(); cx.notify(); }
+    const k = e.key;
+    const m = e.modifiers ?? {};
+    const cmd = m.control || m.platform;
+    const typing = this.focusedField !== null && this.focusedField !== "search";
+    const stop = (fn) => { cx.stop_propagation(); fn(); cx.notify(); };
+
+    if (this.panel === "form") {
+      if (k === "escape") return stop(() => this.closePanel(cx));
+      if (cmd && (k === "enter" || k === "s")) return stop(() => this.save(cx));
+      return;
+    }
+    if (this.panel === "transfer" && k === "escape") return stop(() => this.closePanel(cx));
+    if (typing) return;
+
+    if (cmd && k === "f") return stop(() => this.search.focus());
+    if (cmd && k === "n") return stop(() => this.edit(null, cx));
+    if (k === "down" || (k === "j" && !this.focusedField)) return stop(() => this.move(1, cx));
+    if (k === "up" || (k === "k" && !this.focusedField)) return stop(() => this.move(-1, cx));
+    if (k === "pagedown") return stop(() => this.move(8, cx));
+    if (k === "pageup") return stop(() => this.move(-8, cx));
+    if (k === "escape") {
+      if (this.undo) return stop(() => { this.undo = null; });
+      if (this.query) return stop(() => { this.search.set_value(""); this.query = ""; this.lookup = null; });
+      if (this.focusedField === "search") return stop(() => this.handle.focus());
+      if (this.selected !== null) return stop(() => { this.selected = null; });
+      return;
+    }
+    if (this.focusedField === "search") return; // Enter there is the input's submit
+
+    const row = this.current();
+    if (cmd && k === "z" && this.undo) return stop(() => this.restore(cx));
+    if (cmd && k === "c" && row) return stop(() => this.copyCommand(row.i, cx));
+    if (cmd) return;
+    if (k === "/") return stop(() => this.search.focus());
+    if (k === "n") return stop(() => this.edit(null, cx));
+    if (!row) return;
+    if (k === "enter") return stop(() => this.connect(row.h, m.shift ? "split" : "tab", cx));
+    if (k === "e") return stop(() => this.edit(row.i, cx));
+    if (k === "d") return stop(() => this.duplicate(row.i, cx));
+    if (k === "c") return stop(() => this.copyCommand(row.i, cx));
+    if (k === "delete" || k === "backspace") return stop(() => this.remove(row.i, cx));
   }
+
+  // ---- privacy ----
 
   // Display mode: normal, blur, or dummy. Shared across copies and kept between runs.
   // Older installs stored `true` for blur.
@@ -408,223 +709,489 @@ export default class SshHosts extends View {
     return h.label || target(h);
   }
 
-  heading(t) {
-    if (this.group == null) return div().text_size(18).font_semibold().child("Hosts");
+  // What a host shows as, in the current mode. `hidden` (blur): draw bars instead of text.
+  shown(h, i) {
     const mode = this.viewMode();
-    if (mode === "blur") return this.redact(t, this.group, 18, 22);
-    return div().text_size(18).font_semibold().child(mode === "dummy" ? dummyGroupName(this.hosts, this.group) : this.group);
+    if (mode === "dummy") {
+      const port = h.port && h.port !== "22" ? h.port : "22";
+      return { hidden: false, label: dummyLabel(i), target: `${dummyUser(i)}@${dummyAddress(i)}`, host: dummyAddress(i), user: dummyUser(i), port, group: dummyGroupName(this.hosts, h.group), identity: h.identity ? "~/.ssh/id_ed25519" : "" };
+    }
+    return {
+      hidden: mode === "blur",
+      label: h.label || target(h),
+      target: target(h),
+      host: h.host || h.alias || "",
+      user: h.user || "",
+      port: h.port || "22",
+      group: h.group || "Ungrouped",
+      identity: h.identity || "",
+    };
+  }
+
+  groupLabel(g) {
+    const mode = this.viewMode();
+    return mode === "dummy" ? dummyGroupName(this.hosts, g) : g;
+  }
+
+  // There is no native blur, so hidden text is replaced by a soft bar of a similar width.
+  // The real text is never drawn, so a screenshot cannot recover it.
+  redact(t, text, size, max = 190) {
+    const w = Math.min(max, Math.max(36, String(text ?? "").length * size * 0.58));
+    return div().h(size + 4).flex().items_center().child(div().w(w).h(size * 0.7).rounded(size * 0.35).bg(t.muted + "38"));
+  }
+
+  text(t, hidden, value, size, color, extra) {
+    if (hidden) return this.redact(t, value, size);
+    let el = div().text_size(size).text_color(color).truncate().min_w(0).child(String(value ?? ""));
+    return extra ? extra(el) : el;
+  }
+
+  // ---- pieces ----
+
+  groupColor(t, name) {
+    const palette = [t.ansi4, t.ansi5, t.ansi6, t.ansi2, t.ansi3, t.ansi1, t.ansi12, t.ansi13, t.ansi14, t.ansi10].filter(Boolean);
+    return palette.length ? palette[hash(name || "Ungrouped") % palette.length] : t.accent;
+  }
+
+  avatar(t, h, i, size) {
+    const color = this.groupColor(t, h.group);
+    const s = this.shown(h, i);
+    return div().w(size).h(size).rounded(size * 0.26).flex().items_center().justify_center().flex_none()
+      .bg(color + "2b").text_color(color).text_size(size * 0.36).font_semibold()
+      .child(s.hidden ? svg(ICON("server")).size(size * 0.46) : initials(s.label));
+  }
+
+  kbd(t, text) {
+    return div().h(18).px(5).rounded(4).flex().items_center().flex_none().border_1().border_color(t.border).bg(t.raised)
+      .text_size(10.5).text_color(t.muted).child(text);
+  }
+
+  button(t, id, text, kind, action, icon, hint) {
+    const primary = kind === "primary";
+    const danger = kind === "danger";
+    const fg = primary ? t.accent_foreground : danger ? t.blocked : t.foreground;
+    return h_flex().id(id).h(32).px(12).gap(7).items_center().justify_center().min_w(0).rounded(8).cursor_pointer()
+      .border_1().border_color(primary ? t.accent : danger ? t.blocked + "55" : t.input).bg(primary ? t.accent : t.raised)
+      .text_color(fg).text_size(12.5).font_semibold()
+      .hover((s) => (primary ? s.opacity(0.9) : s.bg(danger ? t.blocked + "1f" : t.hover)))
+      .active((s) => s.opacity(0.8))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((e, cx) => { cx.stop_propagation(); action(e, cx); })
+      .when(Boolean(icon), (el) => el.child(svg(ICON(icon)).size(14).flex_none()))
+      .child(div().min_w(0).truncate().child(text))
+      .when(Boolean(hint), (el) => el.child(div().text_size(10.5).font_normal().opacity(0.7).child(hint)));
+  }
+
+  iconButton(t, id, icon, action, label, active, danger) {
+    return div().id(id).w(32).h(32).rounded(8).flex().items_center().justify_center().flex_none().cursor_pointer()
+      .border_1().border_color(active ? t.accent : "#00000000")
+      .bg(active ? t.accent + "22" : "#00000000")
+      .text_color(danger ? t.blocked : active ? t.accent : t.muted)
+      .tooltip(label).accessibility_label(label)
+      .hover((s) => s.bg(danger ? t.blocked + "1f" : t.hover).text_color(danger ? t.blocked : t.foreground))
+      .active((s) => s.opacity(0.75))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); cx.notify(); })
+      .child(svg(ICON(icon)).size(15));
+  }
+
+  input(t, key, state, extra) {
+    const err = this.errors[key];
+    const focus = this.focusedField === key;
+    let el = Input.new(state).h(34).px(10).rounded(8).border_1()
+      .border_color(err ? t.blocked : focus ? t.accent : t.input).bg(t.background).text_size(13).text_color(t.foreground);
+    return extra ? extra(el) : el;
+  }
+
+  // ---- sidebar ----
+
+  navItem(t, id, icon, label, count, active, action, dot) {
+    return h_flex().id(id).h(32).px(10).gap(9).items_center().flex_none().rounded(8).cursor_pointer()
+      .bg(active ? t.selected : "#00000000").text_color(active ? t.foreground : t.muted).text_size(13)
+      .when(active, (el) => el.font_medium())
+      .when(!active, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
+      .active((s) => s.opacity(0.86))
+      .on_click((_e, cx) => { action(cx); cx.notify(); })
+      .child(dot
+        ? div().w(16).flex().justify_center().flex_none().child(div().w(8).h(8).rounded(4).bg(dot))
+        : svg(ICON(icon)).size(15).flex_none())
+      .child(typeof label === "string" ? div().flex_1().min_w(0).truncate().child(label) : div().flex_1().min_w(0).child(label))
+      .child(div().text_size(11).text_color(t.dim).child(String(count)));
+  }
+
+  pickGroup(g, cx) {
+    this.group = g;
+    const first = this.filtered()[0];
+    if (!this.current()) this.selected = first ? first.i : null;
+    this.scroll.scroll_to_item(0);
+    if (this.panel === "form") this.panel = null;
+  }
+
+  sidebar(t) {
+    const mode = this.viewMode();
+    return v_flex().w(220).flex_none().h_full().bg(t.chrome).border_r(1).border_color(t.border)
+      .child(h_flex().h(56).px(16).gap(10).items_center().flex_none().border_b(1).border_color(t.border)
+        .child(div().w(28).h(28).rounded(8).flex().items_center().justify_center().bg(t.accent).text_color(t.accent_foreground).child(svg(ICON("server")).size(15)))
+        .child(v_flex()
+          .child(div().text_size(14).font_semibold().child("SSH Hosts"))
+          .child(div().text_size(11).text_color(t.dim).child(this.loaded ? `${this.hosts.length} saved` : "Loading…"))))
+      .child(v_flex().id("ssh-nav").flex_1().min_h(0).overflow_y_scroll().p(10).gap(2)
+        .child(this.navItem(t, "nav-all", "layers", "All hosts", this.hosts.length, this.group === null, (cx) => this.pickGroup(null, cx)))
+        .child(this.navItem(t, "nav-recent", "clock", "Recent", this.recentCount(), this.group === RECENT, (cx) => this.pickGroup(RECENT, cx)))
+        .child(div().px(10).pt(16).pb(6).text_size(10.5).font_semibold().text_color(t.dim).child("GROUPS"))
+        .children(this.groups().map(([g, n]) => this.navItem(t, `nav-g-${g}`, null,
+          mode === "blur" ? this.redact(t, g, 12, 120) : this.groupLabel(g), n, this.group === g, (cx) => this.pickGroup(g, cx), this.groupColor(t, g)))))
+      .child(v_flex().p(10).gap(6).flex_none().border_t(1).border_color(t.border)
+        .child(this.button(t, "ssh-transfer", "Import / Export", this.panel === "transfer" ? "primary" : "plain", (_e, cx) => this.openTransfer(cx), "swap").w_full())
+        .child(this.button(t, "ssh-import", "Import ~/.ssh/config", "plain", (_e, cx) => this.importConfig(cx), "file").w_full()));
+  }
+
+  // ---- list ----
+
+  row(t, r, showGroup) {
+    const { h, i, via } = r;
+    const sel = this.selected === i;
+    const s = this.shown(h, i);
+    const auth = authOf(h);
+    return h_flex().h(ROW_H).px(12).gap(12).items_center().rounded(10).cursor_pointer()
+      .border_1().border_color(sel ? t.accent + "88" : "#00000000")
+      .bg(sel ? t.selected : "#00000000")
+      .when(!sel, (el) => el.hover((st) => st.bg(t.hover)))
+      .child(this.avatar(t, h, i, 34))
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(this.text(t, s.hidden, s.label, 13.5, t.foreground, (el) => el.font_semibold()))
+        .child(via
+          ? div().text_size(12).text_color(t.accent).truncate().child(s.hidden || this.viewMode() === "dummy" ? "On this server" : via)
+          : this.text(t, s.hidden, s.target, 12, sel ? t.muted : t.dim)))
+      .when(showGroup, (el) => el.child(
+        h_flex().h(22).px(8).gap(6).items_center().rounded(11).flex_none().max_w(150).bg(t.raised)
+          .child(div().w(6).h(6).rounded(3).flex_none().bg(this.groupColor(t, h.group)))
+          .child(s.hidden ? this.redact(t, s.group, 10, 70) : div().text_size(11).text_color(t.muted).truncate().child(s.group))))
+      .child(div().w(18).flex().justify_center().flex_none().text_color(t.dim)
+        .when(auth !== "default", (el) => el.child(svg(ICON(auth === "key" ? "key" : "lock")).size(13))))
+      .child(div().w(34).flex_none().text_size(11).text_color(t.dim).text_right().child(ago(h.lastUsed, true)));
+  }
+
+  emptyState(t, rows) {
+    const name = domainOf(this.query);
+    const lookup = name && this.lookup?.name === name ? this.lookup : null;
+    const looking = lookup && (lookup.status === "wait" || lookup.status === "loading");
+    const offers = lookup?.status === "done" && !rows.length ? lookup.ips : [];
+    if (offers.length) {
+      return v_flex().p(20).gap(12)
+        .child(div().text_size(14).font_medium().child(`${name} is not in your hosts`))
+        .child(div().text_size(12).text_color(t.dim).child("Add one of its addresses, then fill in a username and how to log in."))
+        .child(v_flex().gap(8).children(offers.map((ip, n) =>
+          h_flex().id(`offer-${n}`).h(52).px(12).gap(12).items_center().rounded(10).border_1().border_color(t.border).bg(t.surface)
+            .child(div().w(34).h(34).rounded(9).flex().items_center().justify_center().flex_none().bg(t.accent + "22").text_color(t.accent).child(svg(ICON("globe")).size(16)))
+            .child(v_flex().flex_1().min_w(0)
+              .child(div().text_size(13).font_semibold().truncate().child(ip))
+              .child(div().text_size(12).text_color(t.dim).child(name)))
+            .child(this.button(t, `offer-add-${n}`, "Add host", "primary", (_e, cx) => this.addResolved(ip, cx), "plus")))));
+    }
+    let title = "No host matches";
+    let body = "Try fewer words, another group, or a domain name to find hosts on the same server.";
+    let action = null;
+    if (!this.hosts.length) {
+      title = "No hosts yet";
+      body = "Add a server, or bring in the ones you already have.";
+      action = h_flex().gap(8).pt(8)
+        .child(this.button(t, "empty-new", "New host", "primary", (_e, cx) => this.edit(null, cx), "plus"))
+        .child(this.button(t, "empty-import", "Import ~/.ssh/config", "plain", (_e, cx) => this.importConfig(cx), "file"));
+    } else if (this.group === RECENT && !this.query.trim()) {
+      title = "Nothing connected yet";
+      body = "Hosts you connect to show up here, newest first.";
+    } else if (looking) { title = `Looking up ${name}…`; body = "Checking it against your saved hosts."; }
+    else if (lookup?.status === "error") { title = `Couldn't look up ${name}`; body = "Check the name, or search by the address you saved."; }
+    else if (lookup?.status === "done" && !lookup.ips.length) { title = `No address for ${name}`; body = "That name did not resolve."; }
+    else if (this.query.trim()) action = h_flex().pt(8).child(this.button(t, "empty-clear", "Clear search", "plain", (_e, cx) => { this.search.set_value(""); this.query = ""; this.lookup = null; cx.notify(); }, "x"));
+    return v_flex().pt(72).px(24).items_center().gap(6)
+      .child(div().w(52).h(52).mb(6).rounded(14).flex().items_center().justify_center().bg(t.raised).text_color(t.dim).child(svg(ICON(looking ? "globe" : "server")).size(24)))
+      .child(div().text_size(14).font_semibold().child(title))
+      .child(div().max_w(340).text_size(12.5).line_height("18px").text_color(t.dim).text_center().child(body))
+      .when(Boolean(action), (el) => el.child(action));
+  }
+
+  heading(t, rows) {
+    const mode = this.viewMode();
+    let title;
+    if (this.group === null) title = div().text_size(16).font_semibold().child("All hosts");
+    else if (this.group === RECENT) title = div().text_size(16).font_semibold().child("Recent");
+    else if (mode === "blur") title = this.redact(t, this.group, 16);
+    else title = h_flex().gap(8).items_center()
+      .child(div().w(9).h(9).rounded(5).bg(this.groupColor(t, this.group)))
+      .child(div().text_size(16).font_semibold().child(this.groupLabel(this.group)));
+    const name = domainOf(this.query);
+    const looking = name && this.lookup?.name === name && (this.lookup.status === "wait" || this.lookup.status === "loading");
+    const sortable = this.group !== RECENT;
+    return h_flex().px(20).pt(14).pb(8).gap(10).items_center().flex_none()
+      .child(title)
+      .child(div().text_size(12).text_color(t.dim).child(`${rows.length}${this.query.trim() ? ` of ${this.group === RECENT ? this.recentCount() : this.group === null ? this.hosts.length : (this.groups().find(([g]) => g === this.group)?.[1] ?? 0)}` : ""}`))
+      .when(Boolean(looking) && rows.length > 0, (el) => el.child(div().text_size(12).text_color(t.muted).child(`Looking up ${name}…`)))
+      .child(div().flex_1())
+      .when(sortable, (el) => el.child(
+        h_flex().h(26).p(2).gap(2).rounded(7).bg(t.raised).flex_none()
+          .children([["name", "A–Z"], ["recent", "Recent"]].map(([k, label]) =>
+            div().id(`sort-${k}`).h(22).px(9).rounded(5).flex().items_center().cursor_pointer().text_size(11.5)
+              .bg(this.sort === k ? t.background : "#00000000").text_color(this.sort === k ? t.foreground : t.dim)
+              .when(this.sort === k, (e) => e.font_medium())
+              .on_click((_e, cx) => { this.sort = k; keep("sort", k); this.scroll.scroll_to_item(0); cx.notify(); })
+              .child(label)))));
+  }
+
+  main(t, narrow) {
+    const rows = this.filtered();
+    const showGroup = this.group === null || this.group === RECENT || rows.some((r) => r.via);
+    const searchFocused = this.focusedField === "search";
+    const toolbar = h_flex().h(56).px(16).gap(10).items_center().flex_none().border_b(1).border_color(t.border)
+      .child(h_flex().flex_1().max_w(620).h(36).pl(11).pr(6).gap(8).items_center().rounded(9).border_1()
+        .border_color(searchFocused ? t.accent : t.input).bg(t.background)
+        .child(svg(ICON("search")).size(15).flex_none().text_color(searchFocused ? t.accent : t.dim))
+        .child(div().flex_1().min_w(0).child(Input.new(this.search).h(32).text_size(13).text_color(t.foreground)))
+        .when(Boolean(this.query), (el) => el.child(this.iconButton(t, "search-clear", "x", () => { this.search.set_value(""); this.query = ""; this.lookup = null; this.search.focus(); }, "Clear search").w(24).h(24)))
+        .when(!this.query && !searchFocused, (el) => el.child(this.kbd(t, "/"))))
+      .child(this.privacyButton(t))
+      .when(narrow, (el) => el.child(this.iconButton(t, "ssh-transfer-small", "swap", (cx) => this.openTransfer(cx), "Import / Export", this.panel === "transfer")))
+      .child(this.button(t, "ssh-new", "New host", "primary", (_e, cx) => this.edit(null, cx), "plus"));
+
+    let body;
+    if (!this.loaded) body = div().p(20).text_size(12.5).text_color(t.dim).child("Loading…");
+    else if (!rows.length) body = v_flex().id("ssh-empty").flex_1().min_h(0).overflow_y_scroll().child(this.emptyState(t, rows));
+    else body = div().flex_1().min_h(0).relative().px(8)
+      .child(v_virtual_list("ssh-rows", rows.length, ROW_H + 2, (n) => String(rows[n].i),
+        (range) => rows.slice(range.start, range.end).map((r) => div().pb(2).child(this.row(t, r, showGroup))))
+        .track_scroll(this.scroll)
+        .on_item_click((key, cx) => this.rowClick(key, cx))
+        .size_full())
+      .child(Scrollbar.vertical("ssh-rows").absolute().inset_0());
+
+    return v_flex().flex_1().min_w(0).h_full().relative()
+      .child(toolbar)
+      .when(this.loaded && this.hosts.length > 0, (el) => el.child(this.heading(t, rows)))
+      .child(body)
+      .when(Boolean(this.error) && this.panel !== "form", (el) => el.child(div().px(20).py(8).text_size(12).text_color(t.blocked).child(this.error)))
+      .when(Boolean(this.undo), (el) => el.child(this.undoBar(t)));
+  }
+
+  undoBar(t) {
+    const s = this.shown(this.undo.entry, this.undo.index);
+    return div().absolute().bottom(16).left(0).right(0).flex().justify_center()
+      .child(h_flex().h(40).pl(14).pr(6).gap(12).items_center().rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+        .child(svg(ICON("trash")).size(14).text_color(t.muted))
+        .child(h_flex().gap(5).items_center().text_size(12.5)
+          .child("Deleted")
+          .child(s.hidden ? this.redact(t, s.label, 12, 90) : div().font_semibold().max_w(200).truncate().child(s.label)))
+        .child(this.button(t, "ssh-undo", "Undo", "plain", (_e, cx) => this.restore(cx), "undo", "Ctrl+Z").h(28)));
   }
 
   privacyButton(t) {
     const mode = this.viewMode();
-    const hidden = mode !== "normal";
     const icon = mode === "blur" ? "eye-off" : mode === "dummy" ? "ghost" : "eye";
-    const tip = mode === "normal" ? "Showing real hosts. Click for blur."
+    const tip = mode === "normal" ? "Showing real hosts. Click to blur them."
       : mode === "blur" ? "Hosts are blurred. Click for dummy names."
-      : "Showing dummy hosts. Click for real names.";
-    return div().id("ssh-privacy").w(34).h(34).rounded(8).flex().items_center().justify_center().flex_none().cursor_pointer()
-      .border_1().border_color(hidden ? t.accent : t.input).bg(hidden ? t.accent + "26" : t.raised)
-      .text_color(hidden ? t.accent : t.muted)
-      .tooltip(tip).accessibility_label(tip)
-      .hover((s) => s.opacity(0.88))
-      .on_click((_e, cx) => { this.cyclePrivacy(); cx.notify(); })
-      .child(svg(ICON(icon)).size(16));
+      : "Showing dummy names. Click for real hosts.";
+    return this.iconButton(t, "ssh-privacy", icon, () => this.cyclePrivacy(), tip, mode !== "normal");
   }
 
-  // There is no native blur, so hidden text is replaced by a soft bar the same width.
-  // The real text is never drawn, so a screenshot cannot recover it.
-  redact(t, text, size, height) {
-    const w = Math.min(190, Math.max(40, String(text ?? "").length * size * 0.62));
-    return div().h(height).flex().items_center().child(div().w(w).h(size * 0.78).rounded(size * 0.4).bg(t.muted + "38"));
+  // ---- right panel ----
+
+  infoRow(t, icon, label, value, hidden, mono) {
+    return h_flex().min_h(34).gap(10).items_center().border_b(1).border_color(t.border)
+      .child(svg(ICON(icon)).size(14).flex_none().text_color(t.dim))
+      .child(div().w(78).flex_none().text_size(12).text_color(t.dim).child(label))
+      .child(div().flex_1().min_w(0).flex().justify_end()
+        .child(hidden ? this.redact(t, value, 12, 120) : div().text_size(12.5).text_color(t.foreground).truncate().when(Boolean(mono), (e) => e.font_family("JetBrains Mono")).child(value || "—")));
   }
 
-  button(t, id, text, primary, action, icon) {
-    return h_flex().id(id).h(32).px(14).gap(6).items_center().min_w(0).rounded(8)
-      .border_1().border_color(primary ? t.accent : t.input).bg(primary ? t.accent : t.raised)
-      .text_color(primary ? t.accent_foreground : t.foreground).text_size(12.5).font_semibold().cursor_pointer()
-      .hover((s) => s.bg(primary ? t.accent : t.hover))
-      .active((s) => s.opacity(0.86)).on_click(action)
-      .when(Boolean(icon), (el) => el.child(svg(ICON(icon)).size(13).flex_none()))
-      .child(div().min_w(0).truncate().child(text));
+  details(t) {
+    const row = this.current();
+    if (!row) return this.shortcuts(t);
+    const { h, i } = row;
+    const s = this.shown(h, i);
+    const auth = authOf(h);
+    const authText = h.alias && !h.host ? "From ~/.ssh/config" : auth === "key" ? "Key file" : auth === "password" ? "Saved password" : "Default";
+    const command = shellLine(sshArgv(h));
+    const copied = this.copied === i;
+    return v_flex().size_full()
+      .child(v_flex().id("ssh-detail").flex_1().min_h(0).overflow_y_scroll().p(18).gap(16)
+        .child(h_flex().gap(12).items_center()
+          .child(this.avatar(t, h, i, 48))
+          .child(v_flex().flex_1().min_w(0).gap(3)
+            .child(this.text(t, s.hidden, s.label, 16, t.foreground, (e) => e.font_semibold()))
+            .child(this.text(t, s.hidden, s.target, 12.5, t.muted))))
+        .child(v_flex().gap(8)
+          .child(this.button(t, "ssh-connect", "Connect", "primary", (_e, cx) => this.connect(h, "tab", cx), "play", "Enter").w_full().h(36))
+          .child(this.button(t, "ssh-split", "Open in split", "plain", (_e, cx) => this.connect(h, "split", cx), "split", "Shift+Enter").w_full()))
+        .child(v_flex()
+          .child(this.infoRow(t, "globe", "Address", s.host, s.hidden))
+          .child(this.infoRow(t, "user", "Username", s.user, s.hidden))
+          .child(this.infoRow(t, "terminal", "Port", s.port, false))
+          .child(this.infoRow(t, auth === "key" ? "key" : "lock", "Login", auth === "key" ? s.identity : authText, auth === "key" && s.hidden))
+          .child(this.infoRow(t, "folder", "Group", s.group, s.hidden))
+          .child(this.infoRow(t, "clock", "Last used", ago(h.lastUsed, false), false))
+          .when(Boolean(h.os) && h.os !== "unknown", (el) => el.child(this.infoRow(t, "server", "System", h.os, false))))
+        .child(v_flex().gap(6)
+          .child(div().text_size(10.5).font_semibold().text_color(t.dim).child("COMMAND"))
+          .child(h_flex().id("ssh-command").min_h(36).pl(10).pr(4).gap(8).items_center().rounded(8).bg(t.background).border_1().border_color(t.border)
+            .child(div().flex_1().min_w(0).child(s.hidden || this.viewMode() === "dummy"
+              ? (s.hidden ? this.redact(t, command, 11.5, 160) : div().text_size(11.5).font_family("JetBrains Mono").text_color(t.muted).truncate().child(`ssh ${s.target}`))
+              : div().text_size(11.5).font_family("JetBrains Mono").text_color(t.muted).truncate().child(command)))
+            .child(this.iconButton(t, "ssh-copy", copied ? "check" : "copy", (cx) => this.copyCommand(i, cx), copied ? "Copied" : "Copy command (C)", copied)))))
+      .child(h_flex().p(12).gap(6).items_center().flex_none().border_t(1).border_color(t.border)
+        .child(this.button(t, "ssh-edit", "Edit", "plain", (_e, cx) => this.edit(i, cx), "pencil", "E").flex_1())
+        .child(this.iconButton(t, "ssh-dup", "duplicate", (cx) => this.duplicate(i, cx), "Duplicate (D)"))
+        .child(this.iconButton(t, "ssh-del", "trash", (cx) => this.remove(i, cx), "Delete (Del) — you can undo", false, true)));
   }
 
-  iconButton(t, id, icon, action, danger, label) {
-    return div().id(id).w(30).h(30).rounded(8).flex().items_center().justify_center().flex_none().cursor_pointer()
-      .text_color(danger ? t.blocked : t.foreground)
-      .tooltip(label).accessibility_label(label)
-      .hover((s) => s.bg(danger ? t.blocked + "24" : t.raised))
-      .active((s) => s.opacity(0.72))
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
-      .child(svg(ICON(icon)).size(15));
+  shortcuts(t) {
+    const line = (keys, what) => h_flex().h(28).gap(10).items_center()
+      .child(h_flex().w(92).gap(4).flex_none().children(keys.map((k) => this.kbd(t, k))))
+      .child(div().text_size(12).text_color(t.muted).child(what));
+    return v_flex().size_full().p(18).gap(14)
+      .child(v_flex().pt(24).items_center().gap(6)
+        .child(div().w(48).h(48).rounded(13).flex().items_center().justify_center().bg(t.raised).text_color(t.dim).child(svg(ICON("terminal")).size(22)))
+        .child(div().text_size(13.5).font_semibold().child("Pick a host"))
+        .child(div().text_size(12).text_color(t.dim).text_center().child("Click once to see it, twice to connect.")))
+      .child(v_flex().pt(10)
+        .child(line(["↑", "↓"], "Move"))
+        .child(line(["Enter"], "Connect in a new tab"))
+        .child(line(["Shift", "Enter"], "Connect in a split"))
+        .child(line(["/"], "Search"))
+        .child(line(["N"], "New host"))
+        .child(line(["E"], "Edit"))
+        .child(line(["D"], "Duplicate"))
+        .child(line(["C"], "Copy ssh command"))
+        .child(line(["Del"], "Delete (undo with Ctrl+Z)"))
+        .child(line(["Esc"], "Clear search / close")));
   }
 
-  navItem(t, id, label, count, active, action) {
-    return h_flex().id(id).h(32).px(10).gap(8).items_center().flex_none().rounded(8).cursor_pointer()
-      .bg(active ? t.selected : t.chrome).text_color(active ? t.foreground : t.muted).text_size(13)
-      .when(active, (el) => el.font_medium())
-      .when(!active, (el) => el.hover((s) => s.bg(t.hover)))
-      .active((s) => s.opacity(0.86)).on_click(action)
-      .child(div().flex_1().min_w(0).truncate().child(label))
-      .child(div().text_size(11).text_color(active ? t.muted : t.dim).child(String(count)));
+  label(t, text, err) {
+    return h_flex().pt(12).pb(5).gap(6).items_center()
+      .child(div().text_size(11.5).font_medium().text_color(t.muted).child(text))
+      .when(Boolean(err), (el) => el.child(div().flex_1().text_right().text_size(11).text_color(t.blocked).truncate().child(err)));
   }
 
-  sidebar(t) {
-    return v_flex().w(210).flex_none().h_full().p(12).gap(2).bg(t.chrome).border_r(1).border_color(t.border)
-      .child(h_flex().items_center().gap(8).px(4).pb(12)
-        .child(div().w(26).h(26).rounded(7).flex().items_center().justify_center().bg(t.accent).text_color(t.accent_foreground).child(svg(ICON("server")).size(14)))
-        .child(div().text_size(14).font_semibold().child("SSH Hosts")))
-      .child(div().px(10).pt(4).pb(6).text_size(11).font_medium().text_color(t.dim).child("VAULT"))
-      .child(this.navItem(t, "nav-all", "All hosts", this.hosts.length, this.group === null, (_e, cx) => { this.group = null; cx.notify(); }))
-      .child(div().px(10).pt(14).pb(6).text_size(11).font_medium().text_color(t.dim).child("GROUPS"))
-      .children(this.groups().map(([g, n]) => {
-        const mode = this.viewMode();
-        const label = mode === "blur" ? this.redact(t, g, 13, 16) : mode === "dummy" ? dummyGroupName(this.hosts, g) : g;
-        return this.navItem(t, `nav-${g}`, label, n, this.group === g, (_e, cx) => { this.group = g; cx.notify(); });
-      }))
-      .child(div().flex_1())
-      .child(v_flex().gap(8)
-        .child(this.button(t, "ssh-transfer", "Import / Export", false, (_e, cx) => this.openTransfer(cx), "swap").w_full())
-        .child(this.button(t, "ssh-import", "Import ~/.ssh/config", false, (_e, cx) => this.importConfig(cx)).w_full()));
-  }
-
-  card(t, { h, i, via }) {
-    const sel = this.selected === i;
-    const mode = this.viewMode();
-    const detailText = mode === "dummy" ? (sel ? dummyTarget(i) : dummySubtitle(i)) : (sel ? target(h) : subtitle(h));
-    // Actions sit on their own row. Sharing the title row squeezed the label
-    // down to a few characters and painted the buttons on top of it.
-    return v_flex().id(`card-${i}`).w(268).flex_none().rounded(12).cursor_pointer().overflow_hidden()
-      .border_1().border_color(sel ? t.accent : t.border).bg(sel ? t.selected : t.surface)
-      .when(!sel, (el) => el.hover((s) => s.bg(t.hover)))
-      .on_mouse_down("left", (e, cx) => {
-        if (e.click_count === 2) this.connect(h, "tab", cx);
-        else { this.selected = i; cx.notify(); }
-      })
-      .child(h_flex().px(12).py(12).gap(12).items_center()
-        .child(div().w(40).h(40).rounded(10).flex().items_center().justify_center().flex_none()
-          .bg(t.accent + (sel ? "33" : "22")).text_color(t.accent).child(svg(ICON("server")).size(20)))
-        .child(v_flex().flex_1().min_w(0).gap(3)
-          .child(mode === "blur" ? this.redact(t, h.label, 14, 18) : div().text_size(14).font_semibold().text_color(t.foreground).truncate().child(mode === "dummy" ? dummyLabel(i) : h.label))
-          .child(mode === "blur" ? this.redact(t, detailText, 12, 16) : div().text_size(12).text_color(sel ? t.muted : t.dim).truncate().child(detailText))
-          .when(Boolean(via), (el) => el.child(
-            div().text_size(12).text_color(t.accent).truncate().child(mode === "normal" ? via : "On this server")))))
-      .when(sel, (el) => el.child(
-        h_flex().px(8).py(6).gap(4).items_center().border_t(1).border_color(t.border).bg(t.surface)
-          .child(h_flex().id(`go-${i}`).h(30).px(10).gap(6).items_center().flex_none().rounded(8).cursor_pointer()
-            .bg(t.accent).text_color(t.accent_foreground).text_size(12).font_semibold()
-            .accessibility_label("Connect").tooltip("Connect")
-            .active((s) => s.opacity(0.86))
-            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .on_click((_e, cx) => { cx.stop_propagation(); this.connect(h, "tab", cx); })
-            .child(svg(ICON("terminal")).size(14)).child("Connect"))
-          .child(div().flex_1())
-          .child(this.iconButton(t, `split-${i}`, "split", (cx) => this.connect(h, "split", cx), false, "Split"))
-          .child(this.iconButton(t, `edit-${i}`, "pencil", (cx) => this.edit(i, cx), false, "Edit"))
-          .child(this.iconButton(t, `del-${i}`, "trash", (cx) => this.remove(i, cx), true, "Remove"))));
-  }
-
-  offerCard(t, name, ip, n) {
-    return v_flex().id(`offer-${n}`).w(268).flex_none().rounded(12).overflow_hidden()
-      .border_1().border_color(t.border).bg(t.surface)
-      .child(h_flex().px(12).py(12).gap(12).items_center()
-        .child(div().w(40).h(40).rounded(10).flex().items_center().justify_center().flex_none()
-          .bg(t.accent + "22").text_color(t.accent).child(svg(ICON("server")).size(20)))
-        .child(v_flex().flex_1().min_w(0).gap(3)
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).truncate().child(name))
-          .child(div().text_size(12).text_color(t.muted).truncate().child(ip))
-          .child(div().text_size(12).text_color(t.accent).truncate().child("Not in your hosts"))))
-      .child(h_flex().px(8).py(6).border_t(1).border_color(t.border).bg(t.surface)
-        .child(this.button(t, `offer-add-${n}`, "Add host", true, (_e, cx) => this.addResolved(ip, cx), "plus")));
-  }
-
-  main(t) {
-    const rows = this.filtered();
-    const name = domainOf(this.query);
-    const lookup = name && this.lookup?.name === name ? this.lookup : null;
-    const looking = lookup && (lookup.status === "wait" || lookup.status === "loading");
-    let emptyTitle = this.hosts.length ? "No host matches" : "Add your first host";
-    let emptyBody = this.hosts.length ? "Try another search or group." : "Press NEW HOST, or import your ~/.ssh/config.";
-    if (looking) { emptyTitle = `Looking up ${name}...`; emptyBody = "Checking it against your saved hosts."; }
-    else if (lookup?.status === "error") { emptyTitle = `Couldn't look up ${name}`; emptyBody = "Check the name, or search by the address you saved."; }
-    else if (lookup?.status === "done" && !lookup.ips.length) { emptyTitle = `No address for ${name}`; emptyBody = "That name did not resolve."; }
-    const offers = lookup?.status === "done" && !rows.length ? lookup.ips : [];
-    const grid = rows.length
-      ? h_flex().flex_wrap().gap(12).content_start().items_start().children(rows.map((r) => this.card(t, r)))
-      : offers.length
-        ? v_flex().gap(12)
-            .child(div().text_size(14).font_medium().child(`${name} is not in your hosts`))
-            .child(div().text_size(12).text_color(t.dim).child("Add the address, then enter a username and a password or a key."))
-            .child(h_flex().flex_wrap().gap(12).items_start().children(offers.map((ip, n) => this.offerCard(t, name, ip, n))))
-        : v_flex().pt(80).items_center().gap(8)
-            .child(div().w(56).h(56).rounded(14).flex().items_center().justify_center().bg(t.raised).text_color(t.dim).child(svg(ICON("server")).size(26)))
-            .child(div().text_size(14).font_medium().child(emptyTitle))
-            .child(div().px(24).text_size(12).text_color(t.dim).child(emptyBody));
-    return v_flex().flex_1().min_w(0).h_full()
-      .child(h_flex().h(60).px(20).gap(12).items_center().flex_none().border_b(1).border_color(t.border)
-        .child(div().flex_1().max_w(520).child(
-          Input.new(this.search).h(34).px(12).rounded(8).border_1()
-            .border_color(this.focusedField === "search" ? t.accent : t.input).bg(t.background).text_size(13).text_color(t.foreground)))
-        .child(div().flex_1())
-        .child(this.privacyButton(t))
-        .child(this.button(t, "ssh-new", "NEW HOST", true, (_e, cx) => this.edit(null, cx), "plus")))
-      .child(v_flex().id("hosts-scroll").flex_1().min_h(0).px(20).py(16).gap(12).overflow_y_scroll()
-        .child(h_flex().items_baseline().gap(8)
-          .child(this.heading(t))
-          .child(div().text_size(12).text_color(t.dim).child(`${rows.length} host${rows.length === 1 ? "" : "s"}`)))
-        .when(looking && rows.length > 0, (el) => el.child(div().text_size(12.5).text_color(t.muted).child(`Looking up ${name}...`)))
-        .child(!this.loaded ? div().text_size(12.5).text_color(t.dim).child("Loading...") : grid)
-        .when(Boolean(this.error) && !this.form, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.error))));
+  section(t, title) {
+    return div().pt(18).pb(2).text_size(10.5).font_semibold().text_color(t.dim).child(title);
   }
 
   formPanel(t) {
-    return v_flex().w(320).flex_none().h_full().p(18).bg(t.chrome).border_l(1).border_color(t.border)
-      .child(h_flex().items_center().pb(6)
+    const old = this.editing !== null ? this.hosts[this.editing] : null;
+    const aliasOnly = Boolean(old?.alias && !old?.host);
+    const mode = this.viewMode();
+    const groupChips = mode === "normal" ? this.groups().map(([g]) => g).filter((g) => g !== "Ungrouped" && g !== (this.values.group ?? "").trim()).slice(0, 10) : [];
+    const authHelp = AUTHS.find(([k]) => k === this.auth)?.[2] ?? "";
+    return v_flex().size_full()
+      .child(h_flex().h(56).px(18).items_center().flex_none().border_b(1).border_color(t.border)
         .child(div().flex_1().text_size(15).font_semibold().child(this.editing === null ? "New host" : "Edit host"))
-        .child(this.iconButton(t, "form-close", "x", (cx) => { this.form = false; this.error = ""; cx.notify(); }, false, "Close")))
-      .child(v_flex().id("form-scroll").flex_1().min_h(0).overflow_y_scroll()
-        .children(FIELDS.map(([key, label]) => v_flex()
-          .child(div().pt(10).pb(5).text_size(11.5).text_color(t.dim).child(label))
-          .child(Input.new(this.inputs[key]).h(34).px(10).rounded(8).border_1()
-            .border_color(this.focusedField === key ? t.accent : t.input).bg(t.background).text_size(13).text_color(t.foreground)))))
-      .when(Boolean(this.error), (el) => el.child(div().pt(8).text_size(12).text_color(t.blocked).child(this.error)))
-      .child(h_flex().pt(16).gap(8).justify_end()
-        .child(this.button(t, "ssh-cancel", "Cancel", false, (_e, cx) => { this.form = false; this.error = ""; cx.notify(); }))
-        .child(this.button(t, "ssh-save", "Save", true, (_e, cx) => this.save(cx))));
+        .child(this.iconButton(t, "form-close", "x", (cx) => this.closePanel(cx), "Close (Esc)")))
+      .child(v_flex().id("form-scroll").flex_1().min_h(0).overflow_y_scroll().px(18).pb(18)
+        .child(this.section(t, "CONNECTION"))
+        .child(h_flex().gap(10).items_start()
+          .child(v_flex().flex_1().min_w(0)
+            .child(this.label(t, "Address", this.errors.host))
+            .child(this.input(t, "host", this.inputs.host)))
+          .child(v_flex().w(78).flex_none()
+            .child(this.label(t, "Port"))
+            .child(this.input(t, "port", this.inputs.port))))
+        .when(Boolean(this.errors.port), (el) => el.child(div().pt(5).text_size(11.5).text_color(t.blocked).child(this.errors.port)))
+        .when(aliasOnly, (el) => el.child(div().pt(5).text_size(11.5).text_color(t.dim).child(`Connects with "ssh ${mode === "normal" ? old.alias : "…"}" from ~/.ssh/config. Leave the address empty to keep it that way.`)))
+        .child(this.label(t, "Username"))
+        .child(this.input(t, "user", this.inputs.user))
+        .child(this.section(t, "LOGIN"))
+        .child(h_flex().mt(8).p(3).gap(3).rounded(9).bg(t.raised)
+          .children(AUTHS.map(([k, name]) => div().id(`auth-${k}`).flex_1().h(28).rounded(7).flex().items_center().justify_center().cursor_pointer()
+            .text_size(12).bg(this.auth === k ? t.background : "#00000000").text_color(this.auth === k ? t.foreground : t.muted)
+            .when(this.auth === k, (e) => e.font_semibold().border_1().border_color(t.border))
+            .when(this.auth !== k, (e) => e.hover((s) => s.text_color(t.foreground)))
+            .on_click((_e, cx) => {
+              this.auth = k;
+              delete this.errors.password; delete this.errors.identity;
+              cx.notify();
+              if (k !== "default") cx.timer.after(40, () => this.inputs[k === "key" ? "identity" : "password"].focus());
+            })
+            .child(name))))
+        .when(this.auth === "password", (el) => el
+          .child(this.label(t, "Password", this.errors.password))
+          .child(h_flex().gap(6).items_center()
+            .child(div().flex_1().min_w(0).child(this.input(t, "password", this.inputs.password)))
+            .child(this.iconButton(t, "pw-eye", this.showPassword ? "eye-off" : "eye", () => {
+              this.showPassword = !this.showPassword;
+              this.inputs.password.set_masked(!this.showPassword);
+            }, this.showPassword ? "Hide password" : "Show password", this.showPassword))))
+        .when(this.auth === "key", (el) => el
+          .child(this.label(t, "Key file", this.errors.identity))
+          .child(this.input(t, "identity", this.inputs.identity)))
+        .child(div().pt(8).text_size(11.5).line_height("16px").text_color(t.dim).child(authHelp))
+        .child(this.section(t, "ORGANIZE"))
+        .child(this.label(t, "Label"))
+        .child(this.input(t, "label", this.inputs.label))
+        .child(this.label(t, "Group"))
+        .child(this.input(t, "group", this.inputs.group))
+        .when(groupChips.length > 0, (el) => el.child(h_flex().pt(8).gap(6).flex_wrap()
+          .children(groupChips.map((g) => h_flex().id(`chip-${g}`).h(24).px(9).gap(6).items_center().rounded(12).cursor_pointer()
+            .border_1().border_color(t.border).bg(t.surface).text_size(11.5).text_color(t.muted)
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => { this.values.group = g; this.inputs.group.set_value(g); cx.notify(); })
+            .child(div().w(6).h(6).rounded(3).bg(this.groupColor(t, g)))
+            .child(g))))))
+      .when(Boolean(this.error), (el) => el.child(div().px(18).pb(6).text_size(12).text_color(t.blocked).child(this.error)))
+      .child(h_flex().p(12).gap(8).items_center().flex_none().border_t(1).border_color(t.border)
+        .child(div().flex_1().text_size(11).text_color(t.dim).child("Ctrl+Enter to save"))
+        .child(this.button(t, "ssh-cancel", "Cancel", "plain", (_e, cx) => this.closePanel(cx)))
+        .child(this.button(t, "ssh-save", this.editing === null ? "Add host" : "Save", "primary", (_e, cx) => this.save(cx), "check")));
   }
 
   transferPanel(t) {
-    const close = (cx) => { this.transfer = false; cx.notify(); };
-    return v_flex().w(340).flex_none().h_full().p(18).bg(t.chrome).border_l(1).border_color(t.border)
-      .child(h_flex().items_center().pb(6)
+    const pathFocus = this.focusedField === "path";
+    return v_flex().size_full()
+      .child(h_flex().h(56).px(18).items_center().flex_none().border_b(1).border_color(t.border)
         .child(div().flex_1().text_size(15).font_semibold().child("Import / Export"))
-        .child(this.iconButton(t, "transfer-close", "x", close, false, "Close")))
-      .child(div().pt(4).text_size(12).line_height("17px").text_color(t.muted).child("A LiteTerm hosts file (.json). You can also drop one onto this tab to import it."))
-      .child(div().pt(14).pb(5).text_size(11.5).text_color(t.dim).child("File path"))
-      .child(Input.new(this.pathInput).h(34).px(10).rounded(8).border_1()
-        .border_color(this.focusedField === "path" ? t.accent : t.input).bg(t.background).text_size(12.5).text_color(t.foreground))
-      .child(h_flex().pt(14).gap(8)
-        .child(this.button(t, "ssh-do-import", "Import", true, (_e, cx) => this.importFile(this.pathInput.value(), cx), "plus"))
-        .child(this.button(t, "ssh-do-export", "Export", false, (_e, cx) => this.exportFile(this.pathInput.value(), cx))))
-      .when(Boolean(this.note), (el) => el.child(div().pt(14).text_size(12).line_height("17px").text_color(this.noteError ? t.blocked : t.working).child(this.note)))
-      .child(div().flex_1())
-      .child(div().text_size(11.5).line_height("16px").text_color(t.dim).child("Import skips hosts already saved (same name, address, user and port). Saved passwords are stored and exported as plain text, and typed for you when ssh asks."));
+        .child(this.iconButton(t, "transfer-close", "x", (cx) => this.closePanel(cx), "Close (Esc)")))
+      .child(v_flex().id("transfer-scroll").flex_1().min_h(0).overflow_y_scroll().p(18).gap(14)
+        .child(div().text_size(12.5).line_height("18px").text_color(t.muted).child("Move hosts in and out as a LiteTerm hosts file (.json). You can also drop a .json file anywhere on this tab."))
+        .child(v_flex().gap(6)
+          .child(div().text_size(11.5).font_medium().text_color(t.muted).child("File"))
+          .child(h_flex().gap(6).items_center()
+            .child(div().flex_1().min_w(0).child(Input.new(this.pathInput).h(34).px(10).rounded(8).border_1()
+              .border_color(pathFocus ? t.accent : t.input).bg(t.background).text_size(12).text_color(t.foreground)))
+            .child(this.iconButton(t, "ssh-browse", "folder", (cx) => this.browse(cx), "Choose a folder"))))
+        .child(h_flex().gap(8)
+          .child(this.button(t, "ssh-do-import", "Import", "primary", (_e, cx) => this.importFile(this.pathInput.value(), cx), "download").flex_1())
+          .child(this.button(t, "ssh-do-export", this.overwrite ? "Replace file" : "Export", this.overwrite ? "danger" : "plain", (_e, cx) => this.exportFile(this.pathInput.value(), cx), "upload").flex_1()))
+        .when(this.busy, (el) => el.child(div().text_size(12).text_color(t.muted).child("Working…")))
+        .when(Boolean(this.note) && !this.busy, (el) => el.child(
+          h_flex().p(10).gap(8).items_start().rounded(8).bg((this.noteError ? t.blocked : t.working) + "1a")
+            .child(svg(ICON(this.noteError ? "x" : "check")).size(14).flex_none().mt(1).text_color(this.noteError ? t.blocked : t.working))
+            .child(div().flex_1().min_w(0).text_size(12).line_height("17px").text_color(t.foreground).child(this.note))))
+        .child(div().h(1).bg(t.border))
+        .child(v_flex().gap(8)
+          .child(div().text_size(11.5).font_medium().text_color(t.muted).child("From this computer"))
+          .child(this.button(t, "ssh-import-config", "Import ~/.ssh/config", "plain", (_e, cx) => this.importConfig(cx), "file").w_full())))
+      .child(div().p(18).flex_none().text_size(11.5).line_height("16px").text_color(t.dim)
+        .child("Import skips hosts you already have (same label, address, user and port). Saved passwords are stored and exported as plain text."));
   }
 
   render() {
     const t = theme();
+    const width = this.size?.width ?? 1200;
+    const showSidebar = width >= 860;
+    const narrow = !showSidebar;
+    const panelOpen = this.panel !== null;
+    const showRight = panelOpen || width >= 640;
+    const right = this.panel === "form" ? this.formPanel(t) : this.panel === "transfer" ? this.transferPanel(t) : this.details(t);
     return h_flex().id("ssh-hosts").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
+      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
       .on_drop((e, cx) => {
         const p = (e.paths ?? []).find((x) => /\.json$/i.test(x));
         if (!p) return;
-        this.transfer = true; this.form = false;
+        this.panel = "transfer";
         this.pathInput.set_value(p);
         this.importFile(p, cx);
       })
       .size_full().min_h(0).bg(t.background).text_color(t.foreground)
-      .child(this.sidebar(t))
-      .child(this.main(t))
-      .when(this.form, (el) => el.child(this.formPanel(t)))
-      .when(this.transfer, (el) => el.child(this.transferPanel(t)));
+      .when(showSidebar, (el) => el.child(this.sidebar(t)))
+      .child(this.main(t, narrow))
+      .when(showRight, (el) => el.child(v_flex().w(this.panel === "form" ? 360 : 320).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border).child(right)));
   }
 }
