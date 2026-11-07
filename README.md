@@ -15,7 +15,7 @@
 - **No scrollbars in the sidebar.** Spaces and Agents still scroll with the wheel, they just don't draw a bar.
 - **Agents as cards.** Program icon with a state badge (spinner, dot), title, project and branch, time since the last change. Sections: Needs you, Done, Working (docked tray), Idle. Pin, settle and close sit on the card's hover.
 - **Spaces with worktrees.** Colored avatars, repo and branch tails (`↑2 ↓1`), worktrees nested under their repo, machine groups when you use ssh machines.
-- **Tabs that name themselves** after the agent's session title (never touching tabs you named), plus Files, Changes, Quota, SSH and Insights buttons.
+- **Tabs that name themselves** after the agent's session title (never touching tabs you named), plus Files, Changes, Quota, SSH, Insights and Poké Ball buttons folded behind one chevron (only the ones that are on show until you unfold them).
 - Photo header, bordered pane cards, status bar. Everything uses theme colors, so any Herdr theme works.
 
 ## What's in this repo

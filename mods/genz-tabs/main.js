@@ -53,6 +53,8 @@ function showInsights() {
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
+    // The Files / Changes / Quota / SSH / Insights / Poké Ball group starts folded.
+    this.toolsOpen = localStorage.getItem("tools-open") === "1";
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     let autoNamed = {};
     try { autoNamed = JSON.parse(localStorage.getItem(AUTO_TITLES) ?? "{}") ?? {}; } catch {}
@@ -157,48 +159,55 @@ export default class Tabs extends View {
     // "quota" is always a panel of this layout, whatever the welcome saved.
     const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "quota"])];
     this.syncPanel(space, panel, body, enabled);
-    const panelButton = (id, label, icon) => {
-      const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
-        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
-        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click(() => {
-          if (on) run("layout.hide", { id: "panel" });
-          else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(svg(icon).size(14)).child(label);
+    // The tool buttons. Folded (the default), only the ones that are on show, as icons, next to
+    // the chevron; unfolded, every one shows with its label. The chevron flips between the two.
+    const panelOn = id => Boolean(panel && !panel.hidden && body?.active === id);
+    const togglePanel = id => {
+      if (panelOn(id)) run("layout.hide", { id: "panel" });
+      else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
     };
     // SSH Hosts: select the space's "SSH" tab, or open it as a tab whose only pane is the ssh-hosts mod.
     const sshTab = shown.find(x => x.name === "SSH");
-    const sshButton = h_flex().id("panel-ssh").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
-      .text_size(12).bg(sshTab?.active ? t.selected : t.chrome).text_color(sshTab?.active ? t.foreground : t.muted)
-      .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click(() => sshTab ? run("tab.select", { id: sshTab.id }) : run("tab.new", { name: "SSH", mod: "ssh-hosts" }))
-      .child(svg("mods/ssh-hosts/server.svg").size(14)).child("SSH");
     // Insights: select the space's Insights tab, or open it as a tab whose only pane is the insights mod.
     const insightsTab = shown.find(x => panes().some(p => p.tab === x.id && p.mod === "insights"));
-    const insightsButton = h_flex().id("panel-insights").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
-      .text_size(12).bg(insightsTab?.active ? t.selected : t.chrome).text_color(insightsTab?.active ? t.foreground : t.muted)
-      .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click(showInsights)
-      .child(svg("mods/insights/insights.svg").size(14)).child("Insights");
     // Pokémon strip: shows or hides the pokemon-agents block, when this layout has one.
-    const mons = find(root, "pokemon-agents"), monsOn = mons && !mons.hidden;
-    const monsButton = div().id("toggle-pokemon").size(26).flex_none().flex().items_center().justify_center().rounded(6)
-      .bg(monsOn ? t.selected : t.chrome).text_color(monsOn ? t.foreground : t.muted)
-      .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click(() => run("layout.toggle", { id: "pokemon-agents" }))
-      .child(svg("mods/pokemon-agents/pokeball.svg").size(14));
+    const mons = find(root, "pokemon-agents");
+    const tools = [
+      enabled.includes("files") && { id: "panel-files", label: "Files", icon: "mods/files/file.svg", on: panelOn("files"), action: () => togglePanel("files") },
+      enabled.includes("changes") && { id: "panel-changes", label: "Changes", icon: "mods/changes/changes.svg", on: panelOn("changes"), action: () => togglePanel("changes") },
+      { id: "panel-quota", label: "Quota", icon: "mods/quota/gauge.svg", on: panelOn("quota"), action: () => togglePanel("quota") },
+      { id: "panel-ssh", label: "SSH", icon: "mods/ssh-hosts/server.svg", on: Boolean(sshTab?.active),
+        action: () => sshTab ? run("tab.select", { id: sshTab.id }) : run("tab.new", { name: "SSH", mod: "ssh-hosts" }) },
+      { id: "panel-insights", label: "Insights", icon: "mods/insights/insights.svg", on: Boolean(insightsTab?.active), action: showInsights },
+      mons && { id: "toggle-pokemon", label: "Pokémon", icon: "mods/pokemon-agents/pokeball.svg", on: !mons.hidden, iconOnly: true,
+        action: () => run("layout.toggle", { id: "pokemon-agents" }) },
+    ].filter(Boolean);
+    const open = this.toolsOpen;
+    const tool = x => {
+      const labeled = open && !x.iconOnly;
+      return h_flex().id(x.id).h(26).flex_none().items_center().rounded(6).text_size(12)
+        .bg(x.on ? t.selected : t.chrome).text_color(x.on ? t.foreground : t.muted)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(x.action)
+        .when(labeled, el => el.px(8).gap(5)).when(!labeled, el => el.w(26).justify_center().tooltip(x.label))
+        .child(svg(x.icon).size(14))
+        .when(labeled, el => el.child(x.label));
+    };
+    const toolsToggle = div().id("tools-toggle").size(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+      .tooltip(open ? "Fold the tools" : "Files, Changes, Quota, SSH, Insights")
+      .on_click((_e, cx) => {
+        this.toolsOpen = !this.toolsOpen;
+        localStorage.setItem("tools-open", this.toolsOpen ? "1" : "0");
+        cx.notify();
+      })
+      .child(svg(`mods/genz-tabs/${open ? "chevron-right" : "chevron-left"}.svg`).size(14));
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
-      .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
-      .child(panelButton("quota", "Quota", "mods/quota/gauge.svg"))
-      .child(sshButton)
-      .child(insightsButton)
-      .when(Boolean(mons), el => el.child(monsButton))
+      .children((open ? tools : tools.filter(x => x.on)).map(tool))
+      .child(toolsToggle)
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/genz-tabs/win-min.svg").size(16) : "âˆ’", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/genz-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "â–¡", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/genz-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
