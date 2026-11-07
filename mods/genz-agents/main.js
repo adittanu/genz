@@ -633,6 +633,9 @@ export default class Agents extends View {
     const rest = list.filter((a) => !this.pins.includes(a.address));
     list = [...pinned, ...rest];
     setAgentOrder(list.map((a) => a.address));
+    // genz: a card names its project (else space) only while the list holds more than one, so a list that is all
+    // one place shows one-line cards; a branch or another machine still gets the second line.
+    const oneCtx = new Set(list.map((a) => this.where(a)?.p.name ?? a.space_name ?? "")).size <= 1;
     const nBlocked = list.filter((a) => a.status === "blocked").length;
     const nWorking = list.filter((a) => a.status === "working").length;
 
@@ -828,14 +831,15 @@ export default class Agents extends View {
       const lead = div().relative().size(30).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center()
         .child(pic ?? svg("mods/genz-agents/bot.svg").size(16).flex_none().text_color(t.muted))
         .when(Boolean(badge), (el) => el.child(badge));
-      const showMeta = !underHeader || Boolean(w?.branch) || Boolean(machine);
+      const hideCtx = underHeader || oneCtx;
+      const showMeta = !hideCtx || Boolean(w?.branch) || Boolean(machine);
       const meta = h_flex().h(16).gap(6).items_center().text_size(11.5).text_color(t.dim)
-        .when(!underHeader, (el) => el
+        .when(!hideCtx, (el) => el
           .child(div().size(8).flex_none().rounded(3).bg(dot(a, w)))
           .child(div().flex_shrink(1).min_w(0).truncate().text_color(t.muted).child(ctx)))
         .when(isPinned, (el) => el.child(svg("mods/workspace-chrome/pin.svg").size(11).flex_none().text_color(t.dim)))
         .when(Boolean(machine), (el) => el.child(this.remote(t, a, machine)))
-        .when(Boolean(w?.branch) && !underHeader, (el) => el.child(div().flex_none().text_color(t.dim).child("Â·")))
+        .when(Boolean(w?.branch) && !hideCtx, (el) => el.child(div().flex_none().text_color(t.dim).child("·")))
         .when(Boolean(w?.branch), (el) => el.child(this.branchLine(t, w).flex_1().min_w(0)));
       const titleLine = h_flex().h(24).gap(6).items_center()
         .child(div().id(`tt-${a.address}`).flex_1().min_w(0).truncate().text_size(13.5)

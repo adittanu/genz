@@ -464,14 +464,17 @@ export default class PokemonAgents extends View {
           .child("×")));
   }
 
-  // genz: where the active space runs (machine, branch). It took the place of the status bar under the strip.
+  // genz: where the active space runs, when that says something: another machine, a branch. It took the place of the
+  // status bar under the strip; on this computer with no branch it shows nothing (null).
   whereInfo(t) {
     const space = spaces().find((s) => s.active);
+    if (!space?.machine && !space?.branch) return null;
     return h_flex().h(20).gap(6).flex_none().items_center().text_size(11).text_color(t.muted)
-      .child(svg(`mods/workspace-chrome/${space?.machine ? "server" : "monitor"}.svg`).size(12).flex_none())
-      .child(div().flex_none().child(space?.machine ?? "This computer"))
-      .when(Boolean(space?.branch), (el) => el
-        .child(div().flex_none().text_color(t.dim).child("·"))
+      .when(Boolean(space.machine), (el) => el
+        .child(svg("mods/workspace-chrome/server.svg").size(12).flex_none())
+        .child(div().flex_none().child(space.machine)))
+      .when(Boolean(space.machine && space.branch), (el) => el.child(div().flex_none().text_color(t.dim).child("·")))
+      .when(Boolean(space.branch), (el) => el
         .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none())
         .child(div().min_w(0).truncate().child(space.branch)));
   }
@@ -481,9 +484,10 @@ export default class PokemonAgents extends View {
     const t = theme();
     const list = agents();
     const calling = list.filter((a) => a.status === "blocked").length;
+    const info = this.whereInfo(t);
     return h_flex().id("pokemon-bar").size_full().px(10).gap(8).items_center().bg(t.chrome)
       .border_t(1).border_color(t.border)
-      .child(this.whereInfo(t).mr(8))
+      .when(Boolean(info), (el) => el.child(info.mr(8)))
       .child(svg("mods/pokemon-agents/pokeball.svg").size(13).text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted)
         .child(list.length ? `Pokémon · ${list.length} agent${list.length === 1 ? "" : "s"}` : "Pokémon"))
@@ -521,15 +525,16 @@ export default class PokemonAgents extends View {
     // Drawn last (below) so it sits above the Pokémon.
     const fold = h_flex().absolute().top(6).right(8).gap(6).child(this.petButton(t)).child(this.foldButton(false, t));
     // genz: machine and branch at the top left, across from Pet / Hide (the strip has no status bar under it).
-    const where = div().absolute().top(6).left(8).px(6).rounded(5).bg(t.chrome).max_w(Math.max(120, this.width - 170))
-      .child(this.whereInfo(t));
+    const info = this.whereInfo(t);
+    const where = info && div().absolute().top(6).left(8).px(6).rounded(5).bg(t.chrome).max_w(Math.max(120, this.width - 170))
+      .child(info);
 
     if (list.length === 0) {
       return root.child(
         div().absolute().inset_0().flex().items_center().justify_center()
           .text_size(12).text_color(t.dim)
           .child("No agents yet. Each agent you start shows up here as a Pokémon."),
-      ).child(where).child(fold);
+      ).when(Boolean(where), (el) => el.child(where)).child(fold);
     }
     if (this.magick === false) {
       root.child(
@@ -632,7 +637,7 @@ export default class PokemonAgents extends View {
           )),
       );
     }
-    return root.child(where).child(fold);
+    return root.when(Boolean(where), (el) => el.child(where)).child(fold);
   }
 
   // ---- the picker (opened as a dialog with props { picker, slot, current, tag }) ----
