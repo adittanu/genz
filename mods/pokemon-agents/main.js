@@ -21,10 +21,12 @@ const PET_W = 168;
 const PET_H = 172;
 const PET_FEET = 128; // the pet's ground line, from its window's top
 
-// The agent the pet follows: whoever needs you, then what just finished, then the focused one.
+// The agent the pet follows: whoever needs you, then what just finished, then work going on
+// (the focused agent first), then the focused one.
 function petAgent(list) {
   return list.find((a) => a.status === "blocked") ?? list.find((a) => a.status === "done")
-    ?? list.find((a) => a.focused) ?? list.find((a) => a.status === "working") ?? list[0] ?? null;
+    ?? list.find((a) => a.status === "working" && a.focused) ?? list.find((a) => a.status === "working")
+    ?? list.find((a) => a.focused) ?? list[0] ?? null;
 }
 
 // Lets the pet out (a frameless window above the terminals that remembers where it was
@@ -135,6 +137,8 @@ export default class PokemonAgents extends View {
     this.width = 900;
     this.height = 112;
     this.folded = localStorage.getItem(FOLDED) === "1";
+    // A pet that was out comes back with the strip (start, or a switch back to this layout).
+    if (petOut()) setPet(true);
     this.mons = {}; // address -> { x, from, target, dir, moving, start, dur, pauseUntil, mood }
     this.sprites = {}; // dex number -> meta | "loading" | { error }
     this.hover = null;
@@ -296,6 +300,13 @@ export default class PokemonAgents extends View {
 
   initPet(cx) {
     this.pet = true;
+    // The pet is the window opened under the "pokemon-pet" key (props { pet: true }); any other
+    // copy, such as one left by an older version, closes itself.
+    if (props().pet !== true) {
+      this.gone = true;
+      closeOverlay(props().overlay);
+      return;
+    }
     this.sprites = {};
     this.hover = false;
     this.magick = null;
@@ -303,17 +314,21 @@ export default class PokemonAgents extends View {
       this.magick = !!(await imageMagick());
       cx.notify();
     });
-    cx.timer.every(400, (cx) => {
+    let ticks = 0;
+    cx.timer.every(1000, (cx) => {
       // Called back from the strip (or the shortcut): go away.
       if (!petOut()) { closeOverlay(props().overlay); return; }
       const list = agents();
       const a = petAgent(list);
       if (this.magick) this.want(a ? assign(list).ids[a.address] : 25, cx);
-      cx.notify();
+      // Agents changing redraws the pet by itself (every redraw repaints the whole window, so
+      // no polling); this only catches it dozing off after a quiet spell.
+      if (++ticks % 15 === 0) cx.notify();
     });
   }
 
   renderPet(cx) {
+    if (this.gone) return div();
     const t = theme();
     const list = agents();
     const a = petAgent(list);

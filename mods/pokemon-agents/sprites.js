@@ -100,9 +100,18 @@ async function cut(sheet, anim, row, scale, out) {
   return { w: fw, h: fh, box: bb };
 }
 
+const have = (file) => fs.exists(file).catch(() => false);
+
+// The strip and the pet can ask for the same Pokémon at once: build it only once.
+const building = new Map();
+export function loadSprite(id) {
+  if (!building.has(id)) building.set(id, buildSprite(id).finally(() => building.delete(id)));
+  return building.get(id);
+}
+
 // Builds (once) and returns the sprite set for a Pokémon: { walkR, walkL, idleR, idleL, sleep },
 // each { path, w, h, box }. Cached on disk; meta.json is written last and marks it done.
-export async function loadSprite(id) {
+async function buildSprite(id) {
   const dir = `${DATA}/sprites/${pad(id)}`;
   const metaFile = `${dir}/meta.json`;
   if (await fs.exists(metaFile).catch(() => false)) {
@@ -113,14 +122,17 @@ export async function loadSprite(id) {
   }
   await fs.mkdir(dir, { recursive: true });
   const base = `${PMD}/${pad(id)}`;
-  await curl([[`${dir}/AnimData.xml`, `${base}/AnimData.xml`]]);
+  // A rebuild after a recipe change reuses what was downloaded before.
+  if (!(await have(`${dir}/AnimData.xml`))) await curl([[`${dir}/AnimData.xml`, `${base}/AnimData.xml`]]);
   const anims = parseAnims(await fs.readFile(`${dir}/AnimData.xml`, "utf8"));
   const walk = resolve(anims, "Walk");
   if (!walk) throw new Error("no walking animation");
   const pick = { Walk: walk, Idle: resolve(anims, "Idle") ?? walk };
   pick.Sleep = resolve(anims, "Sleep") ?? pick.Idle;
   const sheets = [...new Set(Object.values(pick).map((a) => a.name))];
-  await curl(sheets.map((n) => [`${dir}/${n}.png`, `${base}/${n}-Anim.png`]));
+  const missing = [];
+  for (const n of sheets) if (!(await have(`${dir}/${n}.png`))) missing.push(n);
+  if (missing.length) await curl(missing.map((n) => [`${dir}/${n}.png`, `${base}/${n}-Anim.png`]));
   // Big Pokémon (Onix, Gyarados...) have big frames: draw those at 1x.
   const scale = walk.fh > 64 ? 1 : 2;
   const meta = { version: VERSION, id, scale };
