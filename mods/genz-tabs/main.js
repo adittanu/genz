@@ -16,7 +16,8 @@ function find(node, id) {
 // unnamed tab can take that title once the agent reports one.
 const AUTO_TITLES = "auto-titles";
 // Focus: how many recently shown tabs stay on the bar besides the active one and the ones that need you.
-const RECENT_TABS = 2;
+// 0: going between agents is the sidebar's job; the bar is the tab you're on plus what needs you.
+const RECENT_TABS = 0;
 const GENERIC_TITLE = /^(?:opencode|codebuddy|kiro(?:[ -]?cli)?|claude(?:[ -]?code)?|codex|gemini|copilot|pwsh(?:\.exe)?|powershell|windows powershell|cmd(?:\.exe)?|command prompt|bash|zsh|fish|sh|terminal|shell|new session|untitled|home|working|idle|done|blocked)(?:[ -]?cli)?(?:[ -]?v?\d+(?:\.\d+)*)?$/i;
 
 function cleanTitle(raw, pane) {
