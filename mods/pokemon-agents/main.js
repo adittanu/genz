@@ -1,5 +1,6 @@
 // Pokémon agents: every agent is a pixel-art Pokémon roaming a strip at the bottom of the window.
-// Working ones walk around, idle ones stroll and nap, blocked ones stop and call for you.
+// Working ones walk around and show off a move now and then, idle ones stroll, sit about and
+// nap, blocked ones hop and call for you, done ones celebrate, and a napper stretches on waking.
 // Click one to go to its agent; right-click to choose which of the first 151 it is.
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
@@ -13,6 +14,10 @@ const LABEL_H = 18; // name tag under the feet
 const FEET = 24; // ground line, px above the strip's bottom
 const SPEED = { working: 70, idle: 32 }; // px per second
 const SLEEP_AFTER = 30 * 1000; // idle this long: fall asleep
+// Now and then a Pokémon does a one-off: a move while its agent works, a little idle bit while
+// it idles (sprites.js cuts; one a Pokémon lacks is skipped).
+const ACTS = { working: ["charge", "attack"], idle: ["sit", "lookup", "eat"] };
+const ACT_CHANCE = { working: 0.5, idle: 0.35 }; // per stop on the strip
 const BAR_H = 26; // the strip folded down to one slim row
 const FOLDED = "folded"; // localStorage: "1" while folded
 const OPEN_H = "open-height"; // localStorage: the strip's height before it folded
@@ -112,6 +117,24 @@ function moodOf(a, tabs, now) {
   return changed == null || now - changed > SLEEP_AFTER ? "sleep" : "idle";
 }
 
+// A one-off this Pokémon has for the mood, or null.
+function pickAct(meta, mood) {
+  const keys = (ACTS[mood] ?? []).filter((k) => meta?.[k]?.play > 0);
+  return keys.length ? keys[Math.floor(Math.random() * keys.length)] : null;
+}
+
+// The sprite to show: a one-off while it plays, else the mood's pose. Needs you: hops. Done:
+// celebrates. Asleep: sleeps. Otherwise it walks or stands, facing `dir`.
+function poseOf(meta, mood, moving, dir, act) {
+  const stand = dir === "l" ? meta.idleL : meta.idleR;
+  if (act && meta[act]) return meta[act];
+  if (mood === "sleep") return meta.sleep;
+  if (mood === "blocked") return meta.hop ?? stand;
+  if (mood === "done") return meta.cheer ?? stand;
+  if (moving) return dir === "l" ? meta.walkL : meta.walkR;
+  return stand;
+}
+
 // Dex numbers whose name contains the search, or whose number starts with it ("25", "#025").
 function matches(query) {
   const f = query.trim().toLowerCase().replace(/^#/, "");
@@ -199,7 +222,16 @@ export default class PokemonAgents extends View {
         changed = true;
       }
       const mood = moodOf(a, tabs, now);
-      if (mood !== m.mood) { m.mood = mood; changed = true; }
+      const meta = this.sprites[ids[a.address]];
+      if (mood !== m.mood) {
+        // Woken from a nap: it stretches (Wake) before anything else, if it can.
+        const woke = m.mood === "sleep";
+        m.mood = mood;
+        m.act = null;
+        if (woke) this.startAct(m, "wake", meta, now);
+        changed = true;
+      }
+      if (m.act && now >= m.act.until) { m.act = null; changed = true; }
       if (m.moving) {
         const f = clamp((now - m.start) / m.dur, 0, 1);
         if (m.target < lo || m.target > hi) {
@@ -213,6 +245,8 @@ export default class PokemonAgents extends View {
           m.moving = false;
           m.x = m.target;
           m.pauseUntil = now + (mood === "working" ? rand(300, 1800) : rand(4000, 12000));
+          // Now and then it does something before walking on: a move, or a little idle bit.
+          if (Math.random() < (ACT_CHANCE[mood] ?? 0)) this.startAct(m, pickAct(meta, mood), meta, now);
           changed = true;
         } else if (mood !== "working" && mood !== "idle") {
           // Stop where it is: something needs the person, or it fell asleep.
@@ -241,6 +275,14 @@ export default class PokemonAgents extends View {
     });
     for (const k of Object.keys(this.mons)) if (!live.has(k)) { delete this.mons[k]; changed = true; }
     if (changed) cx.notify();
+  }
+
+  // A strip Pokémon's one-off: it stands still until the one-off has played.
+  startAct(m, key, meta, now) {
+    const s = key && meta?.[key];
+    if (!s?.play) return;
+    m.act = { key, at: now, until: now + s.play + 100 };
+    m.pauseUntil = Math.max(m.pauseUntil ?? 0, m.act.until);
   }
 
   openPicker(a, id, tag) {
@@ -314,16 +356,46 @@ export default class PokemonAgents extends View {
       this.magick = !!(await imageMagick());
       cx.notify();
     });
+    this.act = null;
+    this.prevMood = null;
+    this.nextAct = Date.now() + rand(4000, 9000);
     cx.timer.every(1000, (cx) => {
       // Called back from the strip (or the shortcut): go away.
       if (!petOut()) { closeOverlay(props().overlay); return; }
+      const now = Date.now();
       const list = agents();
       const a = petAgent(list);
-      if (this.magick) this.want(a ? assign(list).ids[a.address] : 25, cx);
+      const id = a ? assign(list).ids[a.address] : 25;
+      if (this.magick) this.want(id, cx);
+      const meta = this.sprites[id];
+      const mood = a ? moodOf(a, tabsById(), now) : "sleep";
+      if (mood !== this.prevMood) {
+        // Woken from a nap: it stretches (Wake) first, if it can.
+        const woke = this.prevMood === "sleep";
+        this.prevMood = mood;
+        this.act = null;
+        if (woke) this.playAct("wake", meta, cx);
+        this.nextAct = now + rand(4000, 9000);
+      } else if (!this.act && !this.hover && now >= this.nextAct) {
+        // Now and then: a move while its agent works, a little idle bit while it idles.
+        this.playAct(pickAct(meta, mood), meta, cx);
+        this.nextAct = now + (mood === "working" ? rand(6000, 12000) : rand(8000, 16000));
+      }
       // Agents changing redraws the pet by itself (every redraw repaints the whole window, so
       // no polling). Dozing off is the one change only time makes: redraw just for that.
-      const mood = a ? moodOf(a, tabsById(), Date.now()) : "sleep";
       if (mood !== this.mood) cx.notify();
+    });
+  }
+
+  // Plays one of the pet's one-offs once; then it goes back to its mood's pose.
+  playAct(key, meta, cx) {
+    const s = key && meta?.[key];
+    if (!s?.play) return;
+    const act = { key, at: Date.now() };
+    this.act = act;
+    cx.notify();
+    cx.timer.after(s.play + 100, (cx) => {
+      if (this.act === act) { this.act = null; cx.notify(); }
     });
   }
 
@@ -343,13 +415,14 @@ export default class PokemonAgents extends View {
     let body;
     let headY = PET_FEET - 40;
     if (meta && meta.walkR) {
-      // Working: walks on the spot. Needs you / done: stands facing you. Idle a while: naps.
-      const s = mood === "working" ? meta.walkR : mood === "sleep" ? meta.sleep : meta.idleR;
+      // Working: walks on the spot. Needs you: hops. Done: celebrates. Idle a while: naps.
+      const s = poseOf(meta, mood, mood === "working", "r", this.act?.key);
       const left = PET_W / 2 - (s.box.x + s.box.w / 2);
       const top = PET_FEET - (s.box.y + s.box.h);
       headY = PET_FEET - s.box.h;
       const shadowW = Math.max(14, Math.round(s.box.w * 0.7));
-      body = div()
+      // A new id for each pose (and each one-off) starts its GIF from the first frame.
+      body = div().id(`pose-${s.path}-${this.act?.at ?? 0}`)
         .child(div().absolute().left(PET_W / 2 - shadowW / 2).top(PET_FEET - 2).w(shadowW).h(6).rounded_full().bg("#00000040"))
         .child(image(s.path).absolute().left(left).top(top).w(s.w).h(s.h));
     } else {
@@ -477,15 +550,14 @@ export default class PokemonAgents extends View {
       let body;
       let headY = ground - 40;
       if (meta && meta.walkR) {
-        const s = mood === "sleep" ? meta.sleep
-          : m.moving ? (m.dir === "r" ? meta.walkR : meta.walkL)
-          : (m.dir === "r" ? meta.idleR : meta.idleL);
+        const s = poseOf(meta, mood, m.moving, m.dir, m.act?.key);
         // Stand the sprite's visible feet on the ground line, centered on its visible body.
         const left = SLOT / 2 - (s.box.x + s.box.w / 2);
         const top = ground - (s.box.y + s.box.h);
         headY = ground - s.box.h;
         const shadowW = Math.max(14, Math.round(s.box.w * 0.7));
-        body = div()
+        // A new id for each pose (and each one-off) starts its GIF from the first frame.
+        body = div().id(`pose-${s.path}-${m.act?.at ?? 0}`)
           .child(div().absolute().left(SLOT / 2 - shadowW / 2).top(ground - 2).w(shadowW).h(6).rounded_full().bg("#00000030"))
           .child(image(s.path).absolute().left(left).top(top).w(s.w).h(s.h));
       } else {
