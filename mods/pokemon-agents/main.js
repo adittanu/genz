@@ -1,7 +1,7 @@
 // Pokémon agents: every agent is a pixel-art Pokémon roaming a strip at the bottom of the window.
 // Working ones walk around, idle ones stroll and nap, blocked ones stop and call for you.
 // Click one to go to its agent; right-click to choose which of the first 151 it is.
-import { View, div, image } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { agents, spaces, theme, settings, run, props, shared, setShared, openOverlay, closeOverlay, nextCommand, layout } from "herdr";
 import { NAMES, COUNT, nameOf, dexNo } from "./names.js";
@@ -13,6 +13,9 @@ const LABEL_H = 18; // name tag under the feet
 const FEET = 24; // ground line, px above the strip's bottom
 const SPEED = { working: 70, idle: 32 }; // px per second
 const SLEEP_AFTER = 3 * 60 * 1000; // idle this long: fall asleep
+const BAR_H = 26; // the strip folded down to one slim row
+const FOLDED = "folded"; // localStorage: "1" while folded
+const OPEN_H = "open-height"; // localStorage: the strip's height before it folded
 
 // ---- who is which Pokémon -------------------------------------------------------
 
@@ -112,6 +115,7 @@ export default class PokemonAgents extends View {
     if (this.picker) return this.initPicker(cx);
     this.width = 900;
     this.height = 112;
+    this.folded = localStorage.getItem(FOLDED) === "1";
     this.mons = {}; // address -> { x, from, target, dir, moving, start, dur, pauseUntil, mood }
     this.sprites = {}; // dex number -> meta | "loading" | { error }
     this.hover = null;
@@ -150,7 +154,7 @@ export default class PokemonAgents extends View {
   }
 
   tick(cx) {
-    if (findNode(layout(), "pokemon-agents")?.hidden) return; // hidden strip: no walking, no sprite loads
+    if (this.folded || findNode(layout(), "pokemon-agents")?.hidden) return; // folded or hidden: no walking, no sprite loads
     const now = Date.now();
     const list = agents();
     const tabs = tabsById();
@@ -226,7 +230,47 @@ export default class PokemonAgents extends View {
   }
 
   render(cx) {
-    return this.picker ? this.renderPicker(cx) : this.renderStrip(cx);
+    if (this.picker) return this.renderPicker(cx);
+    return this.folded ? this.renderBar(cx) : this.renderStrip(cx);
+  }
+
+  // Folds the strip to a slim bar (its button stays in reach) or opens it at its old height.
+  setFolded(folded, cx) {
+    if (folded === this.folded) return;
+    if (folded) {
+      const px = findNode(layout(), "pokemon-agents")?.size?.px;
+      if (px > BAR_H + 10) localStorage.setItem(OPEN_H, String(Math.round(px)));
+    }
+    this.folded = folded;
+    localStorage.setItem(FOLDED, folded ? "1" : "0");
+    const open = Number(localStorage.getItem(OPEN_H)) || 112;
+    run("layout.resize", { id: "pokemon-agents", px: folded ? BAR_H : open });
+    cx.notify();
+  }
+
+  foldButton(folded, t) {
+    return h_flex().id("pokemon-fold").h(20).px(6).gap(4).flex_none().items_center().rounded(5)
+      .text_size(11).text_color(t.muted).bg(t.chrome).border(1).border_color(t.border)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .cursor_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.setFolded(!folded, cx); })
+      .child(svg(`mods/pokemon-agents/${folded ? "chevron-up" : "chevron-down"}.svg`).size(12))
+      .child(folded ? "Show" : "Hide");
+  }
+
+  // The folded strip: one row with a Poké Ball, how many agents are out, and Show.
+  renderBar(cx) {
+    const t = theme();
+    const list = agents();
+    const calling = list.filter((a) => a.status === "blocked").length;
+    return h_flex().id("pokemon-bar").size_full().px(10).gap(8).items_center().bg(t.chrome)
+      .border_t(1).border_color(t.border)
+      .child(svg("mods/pokemon-agents/pokeball.svg").size(13).text_color(t.muted))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted)
+        .child(list.length ? `Pokémon · ${list.length} agent${list.length === 1 ? "" : "s"}` : "Pokémon"))
+      .when(calling > 0, (el) => el.child(div().px(6).rounded(7).bg(t.blocked).text_color("#ffffff").text_size(11).font_bold().child(`! ${calling}`)))
+      .child(this.foldButton(true, t));
   }
 
   renderStrip(cx) {
@@ -255,17 +299,19 @@ export default class PokemonAgents extends View {
       })
       // the ground: a faint line the Pokémon stand on
       .child(div().absolute().left(0).right(0).top(ground + 4).h(1).bg(t.border));
+    // Drawn last (below) so it sits above the Pokémon.
+    const fold = div().absolute().top(6).right(8).child(this.foldButton(false, t));
 
     if (list.length === 0) {
       return root.child(
         div().absolute().inset_0().flex().items_center().justify_center()
           .text_size(12).text_color(t.dim)
           .child("No agents yet. Each agent you start shows up here as a Pokémon."),
-      );
+      ).child(fold);
     }
     if (this.magick === false) {
       root.child(
-        div().absolute().top(8).right(12).text_size(11).text_color(t.muted)
+        div().absolute().top(8).right(72).text_size(11).text_color(t.muted)
           .child("Install ImageMagick (magick) to see the Pokémon"),
       );
     }
@@ -365,7 +411,7 @@ export default class PokemonAgents extends View {
           )),
       );
     }
-    return root;
+    return root.child(fold);
   }
 
   // ---- the picker (opened as a dialog with props { picker, slot, current, tag }) ----
