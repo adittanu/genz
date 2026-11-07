@@ -381,8 +381,12 @@ export default class SshHosts extends View {
 
   tick(cx) {
     if (!this.pending.length) return;
+    // Once only, ever: a wrong password is retyped by hand. A finished entry must never be read
+    // again: right after the password goes in, the screen still ends in "password:" until ssh
+    // prints its banner, and a second read would type the password into the remote shell.
+    this.pending = this.pending.filter((p) => !p.dead);
     for (const p of this.pending) {
-      if (p.busy) continue;
+      if (p.busy || p.dead) continue;
       if (Date.now() - p.started > 120000) { p.dead = true; continue; }
       if (!p.address) {
         const f = focused()?.terminal;
@@ -393,20 +397,17 @@ export default class SshHosts extends View {
       cx.spawn(async () => {
         try {
           const r = await hc(["read", p.address]);
-          if (r.code !== 0) p.dead = true;
-          else {
-            const lines = r.stdout.split("\n").map((l) => l.trimEnd()).filter(Boolean);
-            const last = lines[lines.length - 1] ?? "";
-            if (/password[^\n]*:\s*$/i.test(last) && !/passphrase/i.test(last)) {
-              await hc(["send", "--force", "--", p.address, p.password]);
-              p.dead = true; // once only: a wrong password is retyped by hand
-            }
+          if (p.dead) return;
+          if (r.code !== 0) { p.dead = true; return; }
+          const lines = r.stdout.split("\n").map((l) => l.trimEnd()).filter(Boolean);
+          const last = lines[lines.length - 1] ?? "";
+          if (/password[^\n]*:\s*$/i.test(last) && !/passphrase/i.test(last)) {
+            p.dead = true; // before the send, so no other read can get here
+            await hc(["send", "--force", "--", p.address, p.password]);
           }
-        } catch { p.dead = true; }
-        p.busy = false;
+        } catch { p.dead = true; } finally { p.busy = false; }
       });
     }
-    this.pending = this.pending.filter((p) => !p.dead);
   }
 
   copyCommand(i, cx) {
