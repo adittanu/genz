@@ -2,6 +2,8 @@
 // grouped by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
+// genz: a repo at a drive's root (a stray D:\.git) counts as no repo: its spaces are plain folders,
+// called after the folder they're in, not all "D:" under one "D:" row.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -67,13 +69,20 @@ function railSwitch(own, t) {
       .child(svg(other === "spaces" ? "mods/workspace-chrome/layers.svg" : "mods/genz-agents/bot.svg").size(14)));
 }
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
-const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+// A path's last part, Windows' (D:\Project\oot) and git's (D:/Project/oot) alike; a drive's root keeps its letter (D:).
+const base = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "";
+// One spelling to compare folders by: slashes, none at the end, a Windows path's case ignored.
+const norm = (path) => {
+  const p = (path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[A-Za-z]:/.test(p) ? p.toLowerCase() : p;
+};
 // personal: the saved project at a repo's main checkout (git) or holding the folder (plain).
 const expand = (f) => (f === "~" || f?.startsWith("~/") ? home() + f.slice(1) : f);
 function projectAt(on, folder, git) {
-  const inside = (root) => folder === root || folder?.startsWith(`${root}/`);
+  const f = norm(folder);
+  const inside = (root) => f === root || f.startsWith(`${root}/`);
   return (globalThis.__wranglerProjects?.known?.projects ?? [])
-    .find((x) => (x.machine ?? null) === on && (git ? expand(x.folder) === folder : inside(expand(x.folder))));
+    .find((x) => (x.machine ?? null) === on && (git ? norm(expand(x.folder)) === f : inside(norm(expand(x.folder)))));
 }
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
@@ -109,6 +118,7 @@ export default class Spaces extends View {
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
+    this.atRoot = new Set(); // where()s in a repo at a drive's root, counted as plain folders (see check)
     this.pending = new Set(); // where()s to look at next
     this.busy = {}; // pane -> an agent working or a program in front of its shell
     this.ready = {}; // machine -> its layout was readable at the last look
@@ -212,21 +222,36 @@ export default class Spaces extends View {
     this.checked[key] = Date.now();
     this.unsure.delete(key);
     try {
+      // Its repo first, in one cheap call: its top and its own .git folder.
+      const rp = await exec("git", ["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"], { cwd, on });
+      if (rp.code !== 0) {
+        // Only git's own "no" is remembered as no repo; anything else is asked again.
+        if (!/not a git repository/i.test(rp.stderr)) this.unsure.add(key);
+        this.atRoot.delete(key);
+        this.git[key] = null;
+        return;
+      }
+      // Without a trailing slash: git says D:/ for a drive's root, which made it a worktree of itself.
+      const [top, repo] = rp.stdout.split("\n").map((l) => l.trim().replace(/\/+$/, ""));
+      // genz: a repo at a drive's root holds the whole disk, not a project. Its places (its worktrees'
+      // too) count as plain folders, and its status isn't asked (it would walk the whole disk).
+      if (/^([A-Za-z]:)?$/.test(top) || /^([A-Za-z]:)?\/\.git$/.test(repo)) {
+        this.atRoot.add(key);
+        this.git[key] = null;
+        return;
+      }
+      this.atRoot.delete(key);
       // No optional locks: a status that touched the index would wake the watch again.
       // Writes nothing under .git (index lock, fsmonitor cookie): watch() would wake on it.
       const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"], { cwd, on });
       if (r.code !== 0) {
-        // Only git's own "no" is remembered as no repo; anything else is asked again.
-        if (!/not a git repository/i.test(r.stderr)) this.unsure.add(key);
+        this.unsure.add(key);
         this.git[key] = null;
         return;
       }
       // The repo's own .git folder names it; a worktree's top differs from it.
-      const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
-      const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
-      const repo = common.stdout.trim();
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git` };
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
@@ -264,6 +289,13 @@ export default class Spaces extends View {
     run(g ? `projects.space-menu:${w.id}${g.linked ? "|linked" : "|main"}${at}` : `projects.row-menu:${w.id}${at}`);
   }
 
+  // What a row calls its space: its name, else Herdr's (where its first terminal is: repo, else
+  // folder, "~" at home). genz: in a repo at a drive's root Herdr says "D:"; the folder it's in instead.
+  label(w, ps) {
+    if (w.named || !this.atRoot.has(where(w, ps))) return w.name;
+    return base(place(w, ps)) || w.name;
+  }
+
   // Spaces in order, each worktree space moved under its main checkout's.
   // personal: a worktree whose main checkout has no space goes under a row for its repo (ghost) instead.
   // personal: a folded repo keeps only its active worktree.
@@ -271,7 +303,7 @@ export default class Spaces extends View {
     const sp = spaces(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
-    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
+    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null, name: this.label(w, ps) })).filter((r) => this.shown.has(r.w.id));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const out = [];
     const placed = new Set(); // repos whose worktrees are listed (under the first of its spaces, else its ghost row)
@@ -306,7 +338,13 @@ export default class Spaces extends View {
     const p = projectAt(on, main, true);
     const name = p?.name ?? g.name;
     return h_flex().id(`repo-${on ?? ""}-${main}`).px(8).h(34).flex_none().gap(9).items_center().rounded(10).cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_click(() => (p ? run(`projects.open:${p.id}`) : run("space.new", { folder: main, ...(on ? { machine: on } : {}) })))
+      .on_click(() => {
+        // A space already at its main checkout (not sorted under it yet): go there, don't make another.
+        const ps = panes(), there = spaces().find((s) => (s.machine ?? null) === on && norm(place(s, ps)) === norm(main));
+        if (there) run("space.select", { id: there.id });
+        else if (p) run(`projects.open:${p.id}`);
+        else run("space.new", { folder: main, ...(on ? { machine: on } : {}) });
+      })
       .on_mouse_down("right", (e) => { if (p) run(`projects.menu:${p.id}@${Math.round(e.position.x)},${Math.round(e.position.y)}`); })
       .child(h_flex().size(22).flex_none().rounded(7).border(1).border_color(t.dim).items_center().justify_center().text_size(10.5).font_bold().text_color(t.dim).child([...name][0]?.toUpperCase() ?? "?"))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
@@ -400,9 +438,9 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree, first, fold }, t) {
+  row({ w, i, g, name, tree, first, fold }, t) {
     const on = w.active;
-    const isHome = !tree && w.name === "~";
+    const isHome = !tree && name === "~";
     const branch = g?.branch ?? "detached";
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
@@ -449,7 +487,7 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", (e) => this.menu(w, e))
-      .when(Boolean(tree) && branch !== w.name, (el) => el.tooltip(branch))
+      .when(Boolean(tree) && branch !== name, (el) => el.tooltip(branch))
       // personal: worktrees branch off their repo's avatar on a curve, names aligned with the repo's.
       .when(Boolean(tree), (el) => {
         const lift = first ? 5 : 0, mid = rowHeight({ tree }) / 2;
@@ -466,10 +504,10 @@ export default class Spaces extends View {
           .when(!tree && !isHome, el => el.child(h_flex().size(22).flex_none().rounded(7).items_center().justify_center().text_size(11.5).font_bold()
             .when(Boolean(isProject), (a) => a.bg(fill).text_color("#ffffff"))
             .when(!isProject, (a) => a.border(1).border_color(t.dim).text_color(t.dim))
-            .child([...w.name][0]?.toUpperCase() ?? "?")))
+            .child([...name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(tree ? 190 : 150).truncate().text_size(tree ? 13 : 13.5).when(on, (el) => el.font_medium())
-            .text_color(tree && !on ? t.muted : t.foreground).child(isHome ? "Home" : w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+            .text_color(tree && !on ? t.muted : t.foreground).child(isHome ? "Home" : name))
+          .child(g ? this.gitTail(g, tree, name, t) : div().flex_1())
           // personal: a space speaks up when an agent in it is working, finished, or needs you.
           .when(w.status === "working", (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().text_color(t.working).spin(900)))
           .when(w.status === "blocked" || w.status === "done", (el) => el.child(div().size(8).flex_none().rounded(4).bg(tone(t, w.status))))
