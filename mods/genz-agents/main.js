@@ -676,9 +676,10 @@ export default class Agents extends View {
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
     const tabs = spaces().flatMap(s => s.tabs);
+    const ps = panes();
     const label = (a) => {
       const tab = tabs.find(tab => tab.id === a.tab);
-      return tab ? title(tab, lead(tab)) : a.title || a.program?.name || "";
+      return tab ? title(tab, lead(tab, ps)) : a.title || a.program?.name || "";
     };
     const detail = new Map(every.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};
@@ -687,8 +688,12 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
-    // The card's (and the settled row's) title: a Claude session's own title, else the tab's name or the agent's title.
+    // The card's (and the settled row's) title. genz: a named tab's name when this is the tab's agent, so the card, the
+    // tab and its Pokémon read the same (genz-tabs keeps an auto-named tab following the agent's own title). Else a
+    // Claude session's own title, else the tab's name or the agent's title.
     const headOf = (a) => {
+      const tab = tabs.find((x) => x.id === a.tab);
+      if (tab?.named && tab.name && lead(tab, ps)?.pane === a.pane) return tab.name;
       const sub = /claude/i.test(a.app ?? "") ? clean(a.title) : "";
       return (sub && sub !== a.program?.name ? sub : null) ?? detail.get(a.address) ?? (label(a) || a.program?.name || a.address);
     };

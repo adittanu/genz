@@ -99,7 +99,7 @@
                     "content": {
                       "mod": "pane"
                     },
-                    "reveal": "always",
+                    "reveal": "hover",
                     "height": 30,
                     "position": "top"
                   },

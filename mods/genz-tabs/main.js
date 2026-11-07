@@ -115,9 +115,10 @@ export default class Tabs extends View {
     return hidden.length > 1 ? { visible: tabs.filter(c => keep.has(c.id)), hidden } : { visible: tabs, hidden: [] };
   }
 
-  // Name each unnamed tab after the title its agent reports, once. A tab the
-  // person named is never touched; a name this code set is remembered, so
-  // clearing it (rename to "") does not make the title come back.
+  // Name each tab after the title its agent reports, and keep following it, so the tab, the
+  // agent's card in the sidebar and its Pokémon all read the same. A tab the person named is
+  // never touched (its name isn't the one this code last set); a name this code set is
+  // remembered, so clearing it (rename to "") does not make the title come back.
   autoTitle() {
     const all = panes();
     const live = new Set();
@@ -125,15 +126,17 @@ export default class Tabs extends View {
     for (const space of spaces()) {
       for (const tab of space.tabs) {
         live.add(tab.id);
-        if (tab.named) { this.renaming.delete(tab.id); continue; }
-        if (this.autoNamed[tab.id]) continue;
+        const ours = this.autoNamed[tab.id];
         const pending = this.renaming.get(tab.id);
         if (pending && Date.now() - pending < 5000) continue;
+        this.renaming.delete(tab.id);
+        if (tab.named && tab.name !== ours) continue;
+        if (!tab.named && ours) continue;
         const title = all
           .filter(p => p.tab === tab.id && p.terminal && (p.program?.agent || p.status))
           .map(p => cleanTitle(p.title, p))
           .find(Boolean);
-        if (!title) continue;
+        if (!title || title === tab.name) continue;
         this.renaming.set(tab.id, Date.now());
         this.autoNamed[tab.id] = title;
         changed = true;

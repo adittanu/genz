@@ -17,7 +17,9 @@
 - **Agents as cards.** Program icon with a state badge (spinner, dot), title, project and branch, time since the last change. Sections: Needs you, Done, Working (docked tray), Idle. Pin, settle and close sit on the card's hover.
 - **Spaces with worktrees.** Colored avatars, repo and branch tails (`↑2 ↓1`), worktrees nested under their repo, machine groups when you use ssh machines.
 - **A calm tab bar.** It shows the tab you're on and the tabs that need you; the rest fold into a `+N` list. You go between agents from the sidebar, where every one already has a card.
-- **Tabs that name themselves** after the agent's session title (never touching tabs you named), plus Files, Changes, Quota, SSH, Insights and Poké Ball buttons folded behind one chevron (only the ones that are on show until you unfold them).
+- **One name per agent.** Tabs name themselves after the agent's session title and keep following it (never touching tabs you named), and the agent's card and Pokémon use that same name.
+- **Pane headers on hover.** The `Claude Code · folder` header with split, zoom and close shows only while the pointer is on the pane.
+- **Tool buttons.** Files, Changes, Quota, SSH, Insights and Poké Ball folded behind one chevron (only the ones that are on show until you unfold them).
 - Photo header, bordered pane cards, status bar. Everything uses theme colors, so any Herdr theme works.
 
 ## What's in this repo
