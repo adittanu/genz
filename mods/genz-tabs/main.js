@@ -292,7 +292,8 @@ export default class Tabs extends View {
         localStorage.setItem("tools-open", this.toolsOpen ? "1" : "0");
         cx.notify();
       })
-      .child(svg(`mods/genz-tabs/${open ? "chevron-right" : "chevron-left"}.svg`).size(14));
+      // genz: folded it reads "more" (…), not a back arrow beside the window buttons; unfolded, a chevron folds it.
+      .child(svg(`mods/genz-tabs/${open ? "chevron-right" : "ellipsis"}.svg`).size(14));
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
@@ -301,8 +302,10 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .children((open ? tools : tools.filter(x => x.on)).map(tool))
       .child(toolsToggle)
-      .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/genz-tabs/win-min.svg").size(16) : "âˆ’", () => run("window.minimize")))
-        .child(button("maximize", w.platform === "windows" ? svg(`mods/genz-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "â–¡", () => run("window.maximize")))
+      // genz: a thin rule keeps the app's buttons apart from the window's.
+      .when(w?.buttons, el => el.child(div().w(1).h(16).mx(6).flex_none().bg(t.border))
+        .child(button("minimize", w.platform === "windows" ? svg("mods/genz-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
+        .child(button("maximize", w.platform === "windows" ? svg(`mods/genz-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/genz-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
   }
 }

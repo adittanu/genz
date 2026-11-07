@@ -545,10 +545,12 @@ export default class PokemonAgents extends View {
 
     const order = [...list].sort((a, b) => (this.mons[a.address]?.x ?? 0) - (this.mons[b.address]?.x ?? 0));
     // Name tags never overlap: the ones that matter most (hovered, needs you, focused) win.
+    // genz: and only those get one at all (hovered, needs you, done, focused); the rest roam untagged.
     const rank = (a) => (this.hover === a.address ? 0 : a.status === "blocked" ? 1 : a.status === "done" ? 2 : a.focused ? 3 : 4);
     const placed = [];
     const showTag = new Set();
     for (const a of [...list].sort((x, y) => rank(x) - rank(y))) {
+      if (rank(a) > 3) break;
       const m = this.mons[a.address];
       const f = m?.moving ? clamp((now - m.start) / m.dur, 0, 1) : 1;
       const cx0 = m ? m.from + ((m.moving ? m.target : m.x) - m.from) * f : this.width / 2;
