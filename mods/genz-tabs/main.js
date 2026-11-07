@@ -1,5 +1,5 @@
 import { View, div, svg, image } from "gpui-kit";
-import { h_flex } from "gpui-base";
+import { h_flex, v_flex, Popover } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand } from "herdr";
 
 function find(node, id) {
@@ -15,6 +15,8 @@ function find(node, id) {
 // prompt in their terminal title ("OC | ...", "kiro: ...", "✳ ..."), so an
 // unnamed tab can take that title once the agent reports one.
 const AUTO_TITLES = "auto-titles";
+// Focus: how many recently shown tabs stay on the bar besides the active one and the ones that need you.
+const RECENT_TABS = 2;
 const GENERIC_TITLE = /^(?:opencode|codebuddy|kiro(?:[ -]?cli)?|claude(?:[ -]?code)?|codex|gemini|copilot|pwsh(?:\.exe)?|powershell|windows powershell|cmd(?:\.exe)?|command prompt|bash|zsh|fish|sh|terminal|shell|new session|untitled|home|working|idle|done|blocked)(?:[ -]?cli)?(?:[ -]?v?\d+(?:\.\d+)*)?$/i;
 
 function cleanTitle(raw, pane) {
@@ -60,6 +62,11 @@ export default class Tabs extends View {
     try { autoNamed = JSON.parse(localStorage.getItem(AUTO_TITLES) ?? "{}") ?? {}; } catch {}
     this.autoNamed = autoNamed && typeof autoNamed === "object" && !Array.isArray(autoNamed) ? autoNamed : {};
     this.renaming = new Map();
+    // Focus: when each tab was last shown (tab id → ms), and whether the "+N" list is open.
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem("tab-seen") ?? "{}") ?? {}; } catch {}
+    this.seen = seen && typeof seen === "object" && !Array.isArray(seen) ? seen : {};
+    this.moreOpen = false;
     cx.timer.every(2000, () => this.autoTitle());
     this.autoTitle();
     // Key commands from keys.json ("genz-tabs.ssh").
@@ -84,6 +91,27 @@ export default class Tabs extends View {
     if (!ssh) { run("tab.new", { name: "SSH", mod: "ssh-hosts" }); return; }
     run("tab.select", { id: ssh.id });
     run("ssh-hosts.focus");
+  }
+
+  // Focus: the bar shows the active tab, the tabs that need you (blocked or done) and the
+  // RECENT_TABS most recently shown others, in their own order; the rest wait behind "+N".
+  // Every agent is in the sidebar list anyway, so the bar no longer grows with them.
+  focusTabs(tabs, all) {
+    const active = tabs.find(c => c.active);
+    if (active && active.id !== this.lastActive) {
+      this.lastActive = active.id;
+      this.seen[active.id] = Date.now();
+      const live = new Set(all.flatMap(s => s.tabs.map(c => c.id)));
+      for (const id of Object.keys(this.seen)) if (!live.has(id)) delete this.seen[id];
+      localStorage.setItem("tab-seen", JSON.stringify(this.seen));
+    }
+    const needs = c => c.status === "blocked" || c.status === "done";
+    const recent = tabs.filter(c => !c.active && !needs(c))
+      .sort((x, y) => (this.seen[y.id] ?? 0) - (this.seen[x.id] ?? 0)).slice(0, RECENT_TABS);
+    const keep = new Set([active?.id, ...tabs.filter(needs).map(c => c.id), ...recent.map(c => c.id)]);
+    const hidden = tabs.filter(c => !keep.has(c.id));
+    // A chip for a single tab saves nothing: show it instead.
+    return hidden.length > 1 ? { visible: tabs.filter(c => keep.has(c.id)), hidden } : { visible: tabs, hidden: [] };
   }
 
   // Name each unnamed tab after the title its agent reports, once. A tab the
@@ -148,29 +176,67 @@ export default class Tabs extends View {
 
   render() {
     const t = theme();
-    const space = spaces().find(p => p.active);
+    const sp = spaces();
+    const space = sp.find(p => p.active);
     const shown = space?.tabs ?? [];
+    const { visible, hidden } = this.focusTabs(shown, sp);
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
+    const ps = panes();
+    // A tab's program (its agent's, else its first pane's) and the name to show for it.
+    const look = c => {
+      const program = ps.find(p => p.tab === c.id && p.program?.agent)?.program ?? ps.find(p => p.tab === c.id)?.program;
+      return { program, name: /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name };
+    };
+    const iconOf = program => program?.icon ? (program.tint ? svg(program.icon).size(14).flex_none().text_color(t.muted) : image(program.icon).size(14).flex_none()) : null;
+    const mark = c => c.status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)
+      : c.status === "blocked" || c.status === "done" ? div().size(6).flex_none().rounded(3).bg(t[c.status]) : null;
     const item = (c, i) => {
-      const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
-      const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
+      const { program, name } = look(c), pic = iconOf(program), m = mark(c);
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
         .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover))
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
         .on_mouse_up("left", () => {
           const from = this.pressed; this.pressed = null;
-          if (from !== null && from !== i) run("tab.move", { id: shown[from].id, index: space.tabs.findIndex(x => x.id === c.id) + 1 });
+          if (from !== null && from !== i) run("tab.move", { id: visible[from].id, index: space.tabs.findIndex(x => x.id === c.id) + 1 });
           else run("tab.select", { id: c.id });
         })
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
-        .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
+        .when(Boolean(pic), el => el.child(pic))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
-        .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
-        .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
+        .when(Boolean(m), el => el.child(m))
         .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
+    };
+    // Focus: "+N ⌄" after the tabs opens a list of the ones not on the bar. A Popover drawn by this
+    // mod, not an overlay: opening it often costs nothing (each new overlay copy keeps its memory).
+    const moreRow = c => {
+      const { program, name } = look(c), pic = iconOf(program), m = mark(c);
+      return h_flex().id(`more-${c.id}`).h(28).pl(8).pr(4).gap(8).flex_none().items_center().rounded(6).text_size(12.5)
+        .text_color(t.muted).cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { this.moreOpen = false; run("tab.select", { id: c.id }); cx.notify(); })
+        .child(div().size(14).flex_none().flex().items_center().justify_center().when(Boolean(pic), el => el.child(pic)))
+        .child(div().flex_1().min_w(0).truncate().child(name))
+        .when(Boolean(m), el => el.child(m))
+        .child(div().id(`more-close-${c.id}`).size(20).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.dim)
+          .hover(s => s.bg(t.raised).text_color(t.foreground)).tooltip("Close tab")
+          .on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); })
+          .child(svg("mods/pane/close.svg").size(11)));
+    };
+    const more = () => {
+      const menu = Popover.new("tabs-more").anchor("top_left").open(this.moreOpen)
+        .on_open_change((v, cx) => { this.moreOpen = v; cx.notify(); })
+        .trigger(h_flex().id("tabs-more-trigger").h(26).px(8).gap(4).flex_none().items_center().rounded(6).text_size(12)
+          .bg(this.moreOpen ? t.hover : t.chrome).text_color(this.moreOpen ? t.foreground : t.muted)
+          .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(`${hidden.length} more tabs`)
+          .child(`+${hidden.length}`).child(svg("mods/workspace-chrome/chevron-down.svg").size(11)));
+      // Closed, it builds only the chip.
+      if (this.moreOpen) menu.content(v_flex().id("tabs-more-list").w(280).max_h(360).mt(4).p(4).gap(1).rounded(8)
+        .bg(t.popover).border_1().border_color(t.border).overflow_y_scroll().on_mouse_down("left", stop)
+        .children(hidden.map(moreRow)));
+      // The press stops here, under the Popover, so the bar's window drag doesn't take it.
+      return div().id("tabs-more").flex_none().on_mouse_down("left", stop).child(menu);
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
@@ -226,7 +292,8 @@ export default class Tabs extends View {
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
-      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
+      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(visible.map(item))
+        .when(hidden.length > 0, el => el.child(more())))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .children((open ? tools : tools.filter(x => x.on)).map(tool))
       .child(toolsToggle)
