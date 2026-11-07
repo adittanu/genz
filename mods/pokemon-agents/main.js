@@ -16,6 +16,24 @@ const SLEEP_AFTER = 3 * 60 * 1000; // idle this long: fall asleep
 const BAR_H = 26; // the strip folded down to one slim row
 const FOLDED = "folded"; // localStorage: "1" while folded
 const OPEN_H = "open-height"; // localStorage: the strip's height before it folded
+const PET = "pokemon-agents.pet"; // shared: true while the floating pet should be out
+const PET_W = 168;
+const PET_H = 172;
+const PET_FEET = 128; // the pet's ground line, from its window's top
+
+// The agent the pet follows: whoever needs you, then what just finished, then the focused one.
+function petAgent(list) {
+  return list.find((a) => a.status === "blocked") ?? list.find((a) => a.status === "done")
+    ?? list.find((a) => a.focused) ?? list.find((a) => a.status === "working") ?? list[0] ?? null;
+}
+
+// Lets the pet out (a frameless window above the terminals that remembers where it was
+// dropped and comes back on the next start), or calls it back.
+function setPet(out) {
+  setShared(PET, out);
+  if (out) openOverlay({ mod: "pokemon-agents", kind: "window", frame: "none", key: "pokemon-pet", keep: true, width: PET_W, height: PET_H, props: { pet: true } });
+}
+const petOut = () => shared(PET) === true;
 
 // ---- who is which Pokémon -------------------------------------------------------
 
@@ -113,6 +131,7 @@ export default class PokemonAgents extends View {
   init(_p, cx) {
     this.picker = !!props()?.picker;
     if (this.picker) return this.initPicker(cx);
+    if (props()?.pet) return this.initPet(cx);
     this.width = 900;
     this.height = 112;
     this.folded = localStorage.getItem(FOLDED) === "1";
@@ -126,9 +145,10 @@ export default class PokemonAgents extends View {
     });
     cx.timer.every(250, (cx) => this.tick(cx));
     // keys.json: "alt-shift-p": "pokemon-agents.pick" chooses the focused agent's Pokémon.
-    cx.spawn(async () => {
+    cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
+        if (c === "pet") { setPet(!petOut()); cx.notify(); continue; }
         if (c !== "pick") continue;
         const list = agents();
         const a = list.find((x) => x.focused) ?? list[0];
@@ -231,6 +251,7 @@ export default class PokemonAgents extends View {
 
   render(cx) {
     if (this.picker) return this.renderPicker(cx);
+    if (this.pet) return this.renderPet(cx);
     return this.folded ? this.renderBar(cx) : this.renderStrip(cx);
   }
 
@@ -259,6 +280,101 @@ export default class PokemonAgents extends View {
       .child(folded ? "Show" : "Hide");
   }
 
+  petButton(t) {
+    const on = petOut();
+    return h_flex().id("pokemon-pet-toggle").h(20).px(6).gap(4).flex_none().items_center().rounded(5)
+      .text_size(11).text_color(on ? t.foreground : t.muted).bg(on ? t.selected : t.chrome).border(1).border_color(t.border)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .cursor_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); setPet(!on); cx.notify(); })
+      .child(svg("mods/pokemon-agents/pokeball.svg").size(12))
+      .child(on ? "Pet: on" : "Pet");
+  }
+
+  // ---- the pet: one Pokémon floating above the terminals --------------------------
+
+  initPet(cx) {
+    this.pet = true;
+    this.sprites = {};
+    this.hover = false;
+    this.magick = null;
+    cx.spawn(async (cx) => {
+      this.magick = !!(await imageMagick());
+      cx.notify();
+    });
+    cx.timer.every(400, (cx) => {
+      // Called back from the strip (or the shortcut): go away.
+      if (!petOut()) { closeOverlay(props().overlay); return; }
+      const list = agents();
+      const a = petAgent(list);
+      if (this.magick) this.want(a ? assign(list).ids[a.address] : 25, cx);
+      cx.notify();
+    });
+  }
+
+  renderPet(cx) {
+    const t = theme();
+    const list = agents();
+    const a = petAgent(list);
+    const tabs = tabsById();
+    const id = a ? assign(list).ids[a.address] : 25; // no agents: Pikachu keeps you company
+    const mood = a ? moodOf(a, tabs, Date.now()) : "sleep";
+    const meta = this.sprites[id];
+    const calling = list.filter((x) => x.status === "blocked").length;
+    const go = () => a && (a.pane ? run("pane.focus", { pane: a.pane }) : run("agent.focus", { terminal: a.address }));
+
+    let body;
+    let headY = PET_FEET - 40;
+    if (meta && meta.walkR) {
+      // Working: walks on the spot. Needs you / done: stands facing you. Idle a while: naps.
+      const s = mood === "working" ? meta.walkR : mood === "sleep" ? meta.sleep : meta.idleR;
+      const left = PET_W / 2 - (s.box.x + s.box.w / 2);
+      const top = PET_FEET - (s.box.y + s.box.h);
+      headY = PET_FEET - s.box.h;
+      const shadowW = Math.max(14, Math.round(s.box.w * 0.7));
+      body = div()
+        .child(div().absolute().left(PET_W / 2 - shadowW / 2).top(PET_FEET - 2).w(shadowW).h(6).rounded_full().bg("#00000040"))
+        .child(image(s.path).absolute().left(left).top(top).w(s.w).h(s.h));
+    } else {
+      const r = 12;
+      headY = PET_FEET - 2 * r;
+      body = div().absolute().left(PET_W / 2 - r).top(PET_FEET - 2 * r).size(2 * r)
+        .rounded_full().overflow_hidden().border_1().border_color(t.foreground)
+        .loop("opacity", { from: 0.4, to: 1, period: 1200 })
+        .child(div().absolute().left(0).top(0).w(2 * r).h(r).bg("#e3350d"))
+        .child(div().absolute().left(0).top(r).w(2 * r).h(r).bg("#f4f4f4"))
+        .child(div().absolute().left(r - 4).top(r - 4).size(8).rounded_full().bg("#f4f4f4").border_1().border_color(t.foreground));
+    }
+
+    const bubble =
+      mood === "blocked" ? div().px(7).rounded(8).bg(t.blocked).text_color("#ffffff").font_bold().child(calling > 1 ? `! ${calling}` : "!")
+          .loop("opacity", { from: 0.7, to: 1, period: 900 })
+      : mood === "done" ? div().px(7).rounded(8).bg(t.done).text_color("#ffffff").font_bold().child("✓")
+      : mood === "sleep" ? div().text_color(t.muted).frames(["z", "zZ", "zZz", "zZ"], 700)
+      : null;
+
+    const label = a ? (this.hover ? `${nameOf(id)} · ${tagOf(a, tabs)}` : tagOf(a, tabs)) : "No agents yet";
+    return div().id("pokemon-pet").relative().w(PET_W).h(PET_H).cursor_pointer()
+      .on_hover((h, cx) => { if (h !== this.hover) { this.hover = h; cx.notify(); } })
+      // Press and drag moves the pet; a double-click goes to its agent.
+      .on_mouse_down("left", (e) => { if (e.click_count === 2) go(); })
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (a) this.openPicker(a, id, tagOf(a, tabs)); })
+      .child(body)
+      .when(!!bubble, (el) => el.child(h_flex().absolute().left(0).w(PET_W).top(Math.max(2, headY - 24)).justify_center().text_size(13).child(bubble)))
+      .child(h_flex().absolute().left(8).w(PET_W - 16).top(PET_FEET + 8).h(20).px(8).gap(5).justify_center().items_center()
+        .rounded(10).bg(t.popover).border(1).border_color(t.border)
+        .when(!!a, (el) => el.child(div().flex_none().size(6).rounded_full().bg(t[a.status] ?? t.idle)))
+        .child(div().min_w(0).truncate().text_size(10.5).text_color(t.foreground).child(label)))
+      .when(this.hover, (el) => el.child(
+        div().id("pokemon-pet-close").absolute().top(2).right(2).size(20).flex().items_center().justify_center()
+          .rounded_full().bg(t.popover).border(1).border_color(t.border).text_color(t.muted)
+          .hover((s) => s.text_color(t.foreground))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); setShared(PET, false); closeOverlay(props().overlay); })
+          .child("×")));
+  }
+
   // The folded strip: one row with a Poké Ball, how many agents are out, and Show.
   renderBar(cx) {
     const t = theme();
@@ -270,6 +386,7 @@ export default class PokemonAgents extends View {
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted)
         .child(list.length ? `Pokémon · ${list.length} agent${list.length === 1 ? "" : "s"}` : "Pokémon"))
       .when(calling > 0, (el) => el.child(div().px(6).rounded(7).bg(t.blocked).text_color("#ffffff").text_size(11).font_bold().child(`! ${calling}`)))
+      .child(this.petButton(t))
       .child(this.foldButton(true, t));
   }
 
@@ -300,7 +417,7 @@ export default class PokemonAgents extends View {
       // the ground: a faint line the Pokémon stand on
       .child(div().absolute().left(0).right(0).top(ground + 4).h(1).bg(t.border));
     // Drawn last (below) so it sits above the Pokémon.
-    const fold = div().absolute().top(6).right(8).child(this.foldButton(false, t));
+    const fold = h_flex().absolute().top(6).right(8).gap(6).child(this.petButton(t)).child(this.foldButton(false, t));
 
     if (list.length === 0) {
       return root.child(
@@ -311,7 +428,7 @@ export default class PokemonAgents extends View {
     }
     if (this.magick === false) {
       root.child(
-        div().absolute().top(8).right(72).text_size(11).text_color(t.muted)
+        div().absolute().top(8).right(130).text_size(11).text_color(t.muted)
           .child("Install ImageMagick (magick) to see the Pokémon"),
       );
     }

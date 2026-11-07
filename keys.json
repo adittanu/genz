@@ -8,6 +8,7 @@
     "ctrl-shift-m": "mod.open:apple-notes",
     "ctrl-shift-b": "layout.toggle:sidebar",
     "alt-shift-p": "pokemon-agents.pick",
-    "ctrl-shift-y": "layout.toggle:pokemon-agents"
+    "ctrl-shift-y": "layout.toggle:pokemon-agents",
+    "ctrl-shift-u": "pokemon-agents.pet"
   }
 }
