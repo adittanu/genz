@@ -1,5 +1,5 @@
 // Sidebar chrome: the brand row (over the layout's gradient) and the footer.
-import { View, div, image, svg } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, run, props, window, shared, setShared, updates, layout } from "herdr";
 
@@ -68,8 +68,9 @@ export default class WorkspaceChrome extends View {
     return h_flex().size_full().pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(14)
       .when(window()?.platform === "macos" && !collapsed, el => el.pl(76))
       .when(!collapsed, el => el.child(h_flex().flex_1().gap(9).items_center()
-        .child(image("frame/welcome/herdr.png").size(20).rounded(5))
-        .child(div().font_semibold().text_color(t.foreground).child("Herdr"))))
+        // genz: the brand is Kreat, a three-wave mark drawn in the text color right on the header's sea.
+        .child(svg("mods/genz-chrome/kreat.svg").size(20).flex_none().text_color(t.foreground))
+        .child(div().font_semibold().text_color(t.foreground).child("Kreat"))))
       .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg(ICON("sidebar")).size(15), toggleSidebar, "Toggle sidebar")));
   }
 }
