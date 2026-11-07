@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -62,6 +62,28 @@ export default class Tabs extends View {
     this.renaming = new Map();
     cx.timer.every(2000, () => this.autoTitle());
     this.autoTitle();
+    // Key commands from keys.json ("genz-tabs.ssh").
+    cx.spawn(async () => {
+      for (;;) {
+        if (await nextCommand() === "ssh") this.toggleSsh();
+      }
+    });
+  }
+
+  // Ctrl+Shift+S: to the space's SSH tab (opened if it isn't there) with its search ready;
+  // pressed again on the SSH tab, back to the tab you came from.
+  toggleSsh() {
+    const tabs = spaces().find(p => p.active)?.tabs ?? [];
+    const ssh = tabs.find(x => x.name === "SSH");
+    if (ssh?.active) {
+      const back = tabs.find(x => x.id === this.beforeSsh);
+      if (back) run("tab.select", { id: back.id });
+      return;
+    }
+    this.beforeSsh = tabs.find(x => x.active)?.id ?? null;
+    if (!ssh) { run("tab.new", { name: "SSH", mod: "ssh-hosts" }); return; }
+    run("tab.select", { id: ssh.id });
+    run("ssh-hosts.focus");
   }
 
   // Name each unnamed tab after the title its agent reports, once. A tab the
