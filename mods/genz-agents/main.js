@@ -633,15 +633,32 @@ export default class Agents extends View {
     const rest = list.filter((a) => !this.pins.includes(a.address));
     list = [...pinned, ...rest];
     setAgentOrder(list.map((a) => a.address));
+    // genz: where an agent really is: its terminal's live folder. A Claude started after a `cd` sits in a tab of another
+    // folder's space, so a card goes by the folder it runs in (else its space's name). genz-spaces moves such a tab to the
+    // space of its folder a few seconds after the folder settles; until then (or where it can't: a tab with splits, a
+    // space's only tab, another machine) the card already says the right place.
+    const tabs = spaces().flatMap(s => s.tabs);
+    const ps = panes();
+    const low = (x) => slash(x).replace(/\/+$/, "").toLowerCase();
+    const dirName = (f) => slash(f).split("/").filter(Boolean).pop() ?? f;
+    const folderOf = (a) => ps.find((p) => p.pane === a.pane)?.cwd ?? null;
+    const spaceFolder = new Map(spaces().map((s) => [s.id, s.folder]));
+    const astray = (a) => {
+      const f = folderOf(a), r = spaceFolder.get(a.space);
+      return Boolean(f && r && !a.address.includes("/") && !inside(low(f), low(r)));
+    };
+    const ctxOf = (a, w) => w?.p.name ?? (astray(a) ? dirName(folderOf(a)) : a.space_name) ?? "";
     // genz: a card names its project (else space) only while the list holds more than one, so a list that is all
     // one place shows one-line cards; a branch or another machine still gets the second line.
-    const oneCtx = new Set(list.map((a) => this.where(a)?.p.name ?? a.space_name ?? "")).size <= 1;
+    const oneCtx = new Set(list.map((a) => ctxOf(a, this.where(a)))).size <= 1;
     const nBlocked = list.filter((a) => a.status === "blocked").length;
     const nWorking = list.filter((a) => a.status === "working").length;
 
     const ids = this.projects.map((x) => x.id);
     const dot = (a, w) => {
       if (w) return hue(w.p, ids);
+      // genz: an agent away from its space's folder gets a color from the folder it is in.
+      if (astray(a)) return Object.values(MARK)[[...dirName(folderOf(a))].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 6];
       const c = shared("space.colors")?.[a.space];
       return c ? (c.startsWith("#") ? c : (MARK[c] ?? theme()[c])) : t.dim;
     };
@@ -684,11 +701,14 @@ export default class Agents extends View {
     // A row reads "space \u00b7 detail": the detail is a tab someone named or the
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
-    const tabs = spaces().flatMap(s => s.tabs);
-    const ps = panes();
+    // genz: a tab nobody named is called by its number, and an agent there that hasn't said anything yet (a Claude just
+    // opened, before its first message) would read "3". It reads "Claude Code · oot" instead: the program and the
+    // folder it runs in.
+    const fresh = (a) => [a.program?.name, folderOf(a) ? dirName(folderOf(a)) : ""].filter(Boolean).join(" · ") || a.address;
     const label = (a) => {
       const tab = tabs.find(tab => tab.id === a.tab);
-      return tab ? title(tab, lead(tab, ps)) : a.title || a.program?.name || "";
+      const l = tab ? title(tab, lead(tab, ps)) : a.title || a.program?.name || "";
+      return /^\d+$/.test(l) ? fresh(a) : l;
     };
     const detail = new Map(every.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};
@@ -802,7 +822,7 @@ export default class Agents extends View {
       // with the time since it last changed, then a quiet line with its project (else space) and branch.
       // Under a project (or space) header the project is dropped from that line, which then only shows a branch.
       const w = this.where(a);
-      const ctx = w?.p.name ?? a.space_name ?? "";
+      const ctx = ctxOf(a, w);
       const st = rankOf(a) === RANK.done && a.status !== "blocked" ? "done" : a.status;
       const head = headOf(a);
       const hovered = this.hovered === a.address;
@@ -879,11 +899,12 @@ export default class Agents extends View {
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
       const w = !byPriority && this.where(a);
-      const id = byPriority ? `sec-${r}` : w ? `pr-${w.p.id}` : `sp-${a.space}`;
+      // genz: an agent away from its space's folder is grouped by the folder it runs in.
+      const id = byPriority ? `sec-${r}` : w ? `pr-${w.p.id}` : astray(a) ? `fo-${low(folderOf(a))}` : `sp-${a.space}`;
       if (byId.has(id)) { byId.get(id).members.push(a); continue; }
       const g = byPriority
         ? { id, label: SECTION[r], status: SECTION_STATUS[r], members: [a] }
-        : { id, label: w ? w.p.name : a.space_name || "", status: null, color: dot(a, w), members: [a] };
+        : { id, label: ctxOf(a, w), status: null, color: dot(a, w), members: [a] };
       byId.set(id, g);
       groups.push(g);
     }

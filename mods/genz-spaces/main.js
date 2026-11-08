@@ -7,7 +7,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, agents, run, openOverlay, exec, hc, home, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, agents, run, openOverlay, exec, hc, home, theme, shared, setShared, watchFolder, window, layout, focused, notify } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -88,6 +88,23 @@ function projectAt(on, folder, git) {
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
 
+// genz: Follow. A tab lives in the space of the folder it runs in. Herdr makes a space only on request (a `cd` in a
+// terminal never does), so a Claude started after a `cd` stayed in the tab's old space. Now a tab whose terminal holds
+// still in a folder outside its space (FOLLOW_STILL ms, so a passing `cd` doesn't move it) is moved to the space of that
+// folder, and a space is made for the folder's root (saved project, else git top, else the folder) when none is. Kept
+// for safety: only single-pane tabs, only a space's second tab onward (its only tab already names its space), never
+// while an agent in it works or waits on you, one move at a time, and a terminal rests FOLLOW_COOL ms after a move.
+// A move is `terminal.park` + a new tab for the terminal in the target space (labels, as Herdr adopts any
+// terminal); it keeps running throughout. The header's folder button turns this off (shared "spaces.follow").
+const FOLLOW_STILL = 5000;
+const FOLLOW_COOL = 120000;
+const FOLLOW_GAP = 8000;
+const FOLLOW_WARMUP = 20000;
+const hex = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+// A drive's root, "/" and the home folder hold only themselves, not everything under them.
+const wide = (a) => !a || /^([A-Za-z]:)?$/.test(a) || a === norm(home());
+const holds = (anchor, p) => Boolean(anchor) && Boolean(p) && (p === anchor || (!wide(anchor) && p.startsWith(`${anchor}/`)));
+
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -98,8 +115,8 @@ const tile = (color, icon) => h_flex().size(22).flex_none().rounded(7).items_cen
 const machineHue = (name) => Object.values(MARK)[[...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % 6];
 
 // personal: a small icon button for a section header.
-function headerButton(id, icon, tip, t, action) {
-  return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(t.dim)
+function headerButton(id, icon, tip, t, action, on = false) {
+  return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5).text_color(on ? t.accent : t.dim)
     .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click(action)
     .child(svg(`mods/workspace-chrome/${icon}.svg`).size(14));
 }
@@ -139,6 +156,130 @@ export default class Spaces extends View {
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    // genz: Follow (see FOLLOW_STILL). anchors: space id -> the root folder of a space made here, which Herdr's own
+    // `folder` for it (where its first terminal started) may not say. still: terminal -> its folder and since when.
+    this.anchors = JSON.parse(localStorage.getItem("follow.anchors") ?? "{}");
+    this.still = new Map();
+    this.cool = new Map();
+    this.moving = false;
+    this.last = 0;
+    this.started = Date.now();
+    cx.timer.every(1000, (cx) => this.follow(cx));
+  }
+
+  saveAnchors() {
+    localStorage.setItem("follow.anchors", JSON.stringify(this.anchors));
+  }
+
+  // The folder a space holds: where a space made here is rooted, else where its terminals start (home when unset).
+  anchorOf(s) {
+    return norm(this.anchors[s.id] ?? (s.folder || home()));
+  }
+
+  // The root of a folder's project: a saved project holding it, else its git top (not a drive-root repo), else itself.
+  async rootOf(cwd) {
+    const f = norm(cwd);
+    const saved = projectAt(null, f, false);
+    if (saved) return norm(expand(saved.folder));
+    try {
+      const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd });
+      const top = r.code === 0 ? norm(r.stdout.trim()) : "";
+      if (top && !wide(top)) return top;
+    } catch {}
+    return f;
+  }
+
+  async until(test, ms, cx) {
+    for (let waited = 0; waited < ms; waited += 150) {
+      if (test()) return true;
+      await cx.sleep(150);
+    }
+    return test();
+  }
+
+  follow(cx) {
+    const now = Date.now();
+    if (this.moving || shared("spaces.follow") === false || now - this.started < FOLLOW_WARMUP) return;
+    const sp = spaces(), ps = panes();
+    const at = {};
+    for (const s of sp) for (const t of s.tabs ?? []) at[t.id] = { s, t };
+    const live = new Set();
+    let pick = null;
+    for (const p of ps) {
+      const x = at[p.tab];
+      if (!p.terminal || !x || x.s.machine || !p.cwd) continue;
+      live.add(p.terminal);
+      const cwd = norm(p.cwd), was = this.still.get(p.terminal);
+      if (was?.cwd !== cwd) { this.still.set(p.terminal, { cwd, since: now }); continue; }
+      if (pick || now - was.since < FOLLOW_STILL || (this.cool.get(p.terminal) ?? 0) > now) continue;
+      if (x.t.panes !== 1 || x.t.settled || (x.s.tabs ?? []).length < 2 || p.status === "working" || p.status === "blocked") continue;
+      if (holds(this.anchorOf(x.s), cwd)) continue;
+      pick = { p, s: x.s, t: x.t, cwd };
+    }
+    for (const k of [...this.still.keys()]) if (!live.has(k)) this.still.delete(k);
+    for (const [k, until] of [...this.cool]) if (until <= now) this.cool.delete(k);
+    // Anchors of spaces that are gone.
+    if (sp.length && now - this.started > 60000) {
+      const ids = new Set(sp.map((s) => s.id)), gone = Object.keys(this.anchors).filter((id) => !ids.has(id));
+      if (gone.length) { for (const id of gone) delete this.anchors[id]; this.saveAnchors(); }
+    }
+    if (pick && now - this.last >= FOLLOW_GAP) this.relocate(pick, cx);
+  }
+
+  // Moves the terminal's tab to the space of its folder. The terminal runs on throughout; only its pane is
+  // taken away and given back as a new tab. If anything fails after the pane is gone, it goes back to its old space.
+  relocate({ p, s, t, cwd }, cx) {
+    this.moving = true;
+    this.last = Date.now();
+    cx.spawn(async (cx) => {
+      const addr = p.terminal;
+      const tabId = `tb${hex(32)}`;
+      let target = null, asked = false;
+      try {
+        // The folder's project root. The target is a space rooted there, or one rooted deeper that still holds the folder
+        // (a repo inside the project); never one rooted above it: a space on D:\Project must not swallow every project
+        // under it. None: a new space rooted at the folder's root.
+        const root = await this.rootOf(p.cwd);
+        // It moved on while git answered: look again next time.
+        if (norm(panes().find((x) => x.pane === p.pane)?.cwd) !== cwd) return;
+        target = spaces().filter((x) => x.id !== s.id && !x.machine).map((x) => [x, this.anchorOf(x)])
+          .filter(([, a]) => a === root || (a.length > root.length && holds(a, cwd))).sort((l, r) => r[1].length - l[1].length)[0]?.[0].id ?? null;
+        if (!target) {
+          target = `spc${hex(32)}`;
+          this.anchors[target] = root;
+          this.saveAnchors();
+        }
+        const before = focused();
+        run("terminal.park", { terminal: addr });
+        asked = true;
+        if (!(await this.until(() => !panes().some((x) => x.terminal === addr), 8000, cx))) throw new Error("its pane did not close");
+        const r = await hc(["label", addr, `herdr.space=${target}`, `herdr.tab=${tabId}`]);
+        if (r.code !== 0) throw new Error(r.stderr.trim() || "could not label the terminal");
+        if (!(await this.until(() => spaces().find((x) => x.id === target)?.tabs.some((x) => x.id === tabId), 8000, cx))) throw new Error("its new tab did not appear");
+        if (t.named) run("tab.rename", { id: tabId, name: t.name });
+        // The view stays as the person had it: following the terminal if they were on it, else where they were.
+        const now = focused();
+        if (before?.terminal === addr) {
+          run("space.select", { id: target });
+          run("tab.select", { id: tabId });
+          run("pane.focus", { terminal: addr });
+        } else if (before && (now?.space !== before.space || now?.tab !== before.tab)) {
+          run("space.select", { id: before.space });
+          run("tab.select", { id: before.tab });
+          if (before.pane) run("pane.focus", { pane: before.pane });
+        }
+        this.cool.set(addr, Date.now() + FOLLOW_COOL);
+        notify({ title: "Tab moved with its folder", body: `${t.name} → ${spaces().find((x) => x.id === target)?.name ?? base(cwd)}`, level: "info", timeout: 4000 });
+      } catch (e) {
+        // Gone from its pane and not back anywhere: put it back in its old space.
+        if (asked && !panes().some((x) => x.terminal === addr)) await hc(["label", addr, `herdr.space=${s.id}`, `herdr.tab=tb${hex(32)}`]).catch(() => {});
+        if (target && this.anchors[target] && !spaces().some((x) => x.id === target)) { delete this.anchors[target]; this.saveAnchors(); }
+        this.cool.set(addr, Date.now() + 10 * FOLLOW_COOL);
+        notify({ title: "Couldn't move the tab", body: String(e?.message ?? e), level: "error" });
+      } finally {
+        this.moving = false;
+      }
+    });
   }
 
   checkNew(cx) {
@@ -545,6 +686,7 @@ export default class Spaces extends View {
     if (changed) setShared("space.colors", kept);
     // While Agents is up this block is 0 px: skip the agent counts its switch would show.
     const ags = listShown() === "agents" ? [] : agents();
+    const follow = shared("spaces.follow") !== false;
     const counts = { spaces: sp.length, blocked: ags.filter((a) => a.status === "blocked").length, working: ags.filter((a) => a.status === "working").length };
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       // genz: the header switches the sidebar between Spaces and Agents, finds a project (picker) and opens the new space / project menu where it was clicked.
@@ -552,6 +694,8 @@ export default class Spaces extends View {
         .child(listSwitch("spaces", t, counts))
         .child(div().flex_1())
         .child(headerButton("sp-find", "search", "Find project (⌃⇧J)", t, () => run("projects.pick")))
+        // genz: Follow on/off: tabs move to the space of the folder they run in.
+        .child(headerButton("sp-follow", "folder", `Tabs follow their folder into its space: ${follow ? "on" : "off"}. Click to turn it ${follow ? "off" : "on"}.`, t, () => setShared("spaces.follow", !follow), follow))
         .child(headerButton("sp-new", "plus", "New space or project", t,
           (ev) => run(ev?.position ? `projects.new-menu@${Math.round(ev.position.x)},${Math.round(ev.position.y)}` : "projects.new-menu")))))
       .when(collapsed, (el) => el.child(railSwitch("spaces", t)))
