@@ -60,7 +60,7 @@ The window has no system title bar (`titlebar: "none"`; macOS lights at 12, 16).
 
 Files of one folder: `layouts/genz.json`, `layouts/genz-preview.svg`, `backgrounds/ocean-header.png`, `keys.json`, `mods/*`.
 
-**Layout tree** (`layouts/genz.json`; root `preview: "layouts/genz-preview.svg"`, `background: "canvas"`, `terminal_padding: [14, 12]`, `divider: {width 1, color "border"}`, `titlebar: "none"`, `traffic_lights: [12, 16]`):
+**Layout tree** (`layouts/genz.json`; root `preview: "layouts/genz-preview.svg"`, `background: "canvas"`, `terminal_padding: [36, 12]`, `divider: {width 1, color "border"}`, `titlebar: "none"`, `traffic_lights: [12, 16]`):
 
 ```
 root row
@@ -104,6 +104,7 @@ root row
 - Don't call `cx.notify()` from `setSettled` while rendering (the render clears labels itself); notify in click handlers and timers.
 - `mod.open` on a `place: "none"` mod such as `genz-agents` opens it as a floating overlay. Don't use it to "reload" a mod.
 - The 342 px sidebar is what the preview was made with (it predates the Spaces | Agents switch and shows both lists); a zoom of 0.8 was used for the screenshot.
+- The pane header (30 px, `reveal: "hover"`) is drawn over the terminal and the terminal never resizes, so the first terminal row used to sit under it: in a fresh session the prompt was hidden while the pointer was on the pane. `terminal_padding` only takes two numbers `[vertical, horizontal]` (a 4-number array is refused: "invalid length 4"), so the top gap is the vertical value, 36 (header + a small gap), and the bottom gets the same.
 - The settle button needs the agent to be finished. Working or blocked agents (or ones with a working sub-agent) don't get it.
 - The `projects` mod keeps `git config branch.<name>.wranglerTemp` and the `wrangler` log folder under `$XDG_STATE_HOME`; those names are from an earlier life of the mod and are kept so existing worktrees still work.
 - The quota panel stores the 9Router password as plain text in `data/9router-quota.json`.
