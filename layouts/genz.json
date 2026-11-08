@@ -193,8 +193,8 @@
   ],
   "background": "canvas",
   "terminal_padding": [
-    36,
-    12
+    14,
+    36
   ],
   "divider": {
     "width": 1,
