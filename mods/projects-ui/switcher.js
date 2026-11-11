@@ -2,6 +2,9 @@
 // recently focused (the host's mru), the focused one last; it opens on the previous agent, so open + Enter flips
 // between two. Type to filter (space-separated words, each a subsequence), ↑↓ or ctrl-j/k move, Enter goes, ⇧Enter
 // peeks, 1-9 (no filter) goes to that row.
+// genz: plain terminals follow the agents, as the sidebar's Terminals group lists them (genz-agents shares its list
+// on globalThis.__genzTerminals: running ones first, then the most recently used), found by command, tab name,
+// folder or branch. Without that list (another layout) the switcher shows agents only.
 import { div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { agents, focused, panes, run, spaces, terminals } from "herdr";
@@ -70,6 +73,13 @@ export const views = {
         if (f && !fits([w.name, w.task, w.branch, a.program?.name, a.space_name, ...team.map((x) => nameOf(x.k))].join(" ").toLowerCase(), f)) continue;
         out.push({ a, addr: a.address, w, status: a.status, depth: 0 }, ...team);
       }
+      // genz: the terminals, the one you're on last (as with agents).
+      const shared = globalThis.__genzTerminals;
+      const shells = shared && Date.now() - shared.at < 90000 ? shared.list.filter((x) => ps.some((p) => p.pane === x.pane)) : [];
+      for (const x of [...shells.filter((x) => x.address !== this.here), ...shells.filter((x) => x.address === this.here)]) {
+        if (f && !fits([x.head, x.ctx, x.under, x.branch, x.program?.name, "terminal"].join(" ").toLowerCase(), f)) continue;
+        out.push({ x, addr: x.address, depth: 0 });
+      }
       return out;
     },
 
@@ -77,6 +87,7 @@ export const views = {
       if (!r) return;
       this.close();
       if (peek) send("peek", r.addr);
+      else if (r.x) run("pane.focus", { pane: r.x.pane });
       else run("agent.focus", { terminal: r.addr });
     },
 
@@ -95,6 +106,24 @@ export const views = {
         .child(div().w(r.depth * 14).flex_none().text_right().text_color(t.dim).child("└"))
         .child(glyph(t, r.status))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(nameOf(r.k)));
+      // genz: a terminal: its place's letter, the program's icon, the place, then what it runs (or its name) and
+      // how long the command has run or since it was last used.
+      if (r.x) {
+        const x = r.x, busy = Boolean(x.job), when = age(busy ? x.job.at : x.at);
+        return el
+          .child(h_flex().size(18).flex_none().rounded(5).bg(x.color ?? t.dim).items_center().justify_center()
+            .text_size(10.5).font_bold().text_color("#ffffff").child([...(x.ctx || x.head)][0]?.toUpperCase() ?? "?"))
+          .child(icon(x.program, 15, busy ? t.foreground : t.muted) ?? div())
+          .child(div().flex_shrink(0).max_w(140).truncate().text_size(13).text_color(busy ? t.foreground : t.muted).child(x.ctx || x.under))
+          .when(r.addr === this.here, (el) => el.child(div().flex_none().px(5).h(16).flex().items_center().rounded(4).bg(t.raised).text_size(10.5).text_color(t.dim).child("here")))
+          .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.muted).child(x.head === x.ctx ? (x.program?.name ?? "") : x.head))
+          .when(!!x.branch, (el) => el.child(h_flex().flex_shrink(1).max_w(150).min_w(0).gap(5).items_center().text_size(11.5).text_color(t.dim)
+            .child(svg(ICON("branch")).size(12).flex_none())
+            .child(div().min_w(0).truncate().child(x.branch))))
+          .child(h_flex().w(108).flex_none().justify_end().gap(5).items_center().text_size(11.5).text_color(busy ? t.working : t.dim)
+            .when(busy, (el) => el.child(h_flex().w(14).flex_none().items_center().justify_center().child(div().size(7).rounded(4).bg(t.working))))
+            .child(busy ? `Running${when && when !== "now" ? ` ${when}` : ""}` : when === "now" ? "just now" : when));
+      }
       const w = r.w, sp = spaces(), ps = panes(), here = r.addr === this.here;
       const mark = w.p ? badge(w.p, sp, ps) : h_flex().size(18).flex_none().rounded(5).bg(spaceHue(r.a.space) ?? t.dim).items_center().justify_center()
         .text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?");
@@ -116,6 +145,8 @@ export const views = {
 
     draw(t) {
       const rows = this.rows(), n = rows.length;
+      const nShells = rows.filter((r) => r.x).length, nAgents = rows.filter((r) => r.a).length;
+      const count = [`${nAgents} agent${nAgents === 1 ? "" : "s"}`, ...(nShells ? [`${nShells} terminal${nShells === 1 ? "" : "s"}`] : [])].join(" · ");
       let at = rows.findIndex((r) => r.addr === this.sel);
       if (at < 0) { at = 0; this.sel = rows[0]?.addr ?? null; }
       reveal(this.list, at, MAX);
@@ -142,11 +173,11 @@ export const views = {
           .child(h_flex().flex_1().min_w(0).items_center().text_size(14)
             .when(!!this.filter, (el) => el.child(div().truncate().text_color(t.foreground).child(this.filter)))
             .child(div().w(1).h(16).flex_none().bg(t.accent))
-            .when(!this.filter, (el) => el.child(div().pl(2).truncate().text_color(t.dim).child("Switch to an agent…"))))
-          .child(div().flex_none().text_size(11.5).text_color(t.dim).child(`${n} agent${n === 1 ? "" : "s"}`)))
+            .when(!this.filter, (el) => el.child(div().pl(2).truncate().text_color(t.dim).child("Switch to an agent or terminal…"))))
+          .child(div().flex_none().text_size(11.5).text_color(t.dim).child(count)))
         .child(v_flex().flex_1().min_h(0).p(6)
           .when(!!n, (el) => el.child(windowed(t, "sw-list", this.list, n, MAX, ROW, (i) => this.row(t, rows[i], i, i === at))))
-          .when(!n, (el) => el.child(div().px(10).py(8).text_color(t.dim).child(this.filter ? "No agent matches." : "No agents running."))))
+          .when(!n, (el) => el.child(div().px(10).py(8).text_color(t.dim).child(this.filter ? "Nothing matches." : "Nothing running."))))
         .child(h_flex().flex_none().px(16).py(9).border_t(1).border_color(t.border)
           .child(hints(t, [["↵", "go"], ["⇧↵", "peek"], ["1-9", "jump"], ["esc", "close"]])));
     },

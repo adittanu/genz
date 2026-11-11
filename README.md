@@ -15,6 +15,7 @@
 - **Spaces or Agents, one at a time.** A `Spaces | Agents` switch at the top of the sidebar flips between the two lists; the Agents side keeps its needs-you and working counts on the switch, so you see them from Spaces too.
 - **No scrollbars in the sidebar.** Spaces and Agents still scroll with the wheel, they just don't draw a bar.
 - **Agents as cards.** Program icon with a state badge (spinner, dot), title, project and branch, time since the last change. Sections: Needs you, Done, Working (docked tray), Idle. Pin, settle and close sit on the card's hover.
+- **Terminals in the same list.** Plain terminals (shells, ssh, dev servers) get a `Terminals` group under the agents, so you don't hunt for them through spaces and the `+N` tab list. Each card is titled by what tells it apart: the command running in it (`npm run dev`, `ssh vps`), else the tab's name, else its folder; the line under it says where it is and its branch. Running ones come first, with a dot on the icon and how long they have run; idle ones follow by when you last used them, and all but the first five fold into `N more`. Click a card to go there; an idle one closes from its hover. The switcher (`ctrl-shift-a`) lists and searches them too.
 - **A brand-new agent reads where it runs.** A Claude you just opened (before its first message) is listed as `Claude Code · oot`, with `oot` as its place, taken from its terminal's live folder. It no longer reads as the tab's number under the space the tab was made in.
 - **Tabs follow their folder into its space.** Herdr only makes a space on request, so a `cd` in a terminal never added one. Now a single-pane tab whose terminal holds still (5 s) in a folder outside its space moves to the space of that folder, and a space is made for the folder's project root (a saved project, else the git top, else the folder) when there is none. It never moves a tab while its agent is working or waiting on you, never splits a tab with panes, and leaves a space's only tab alone (that space already names itself after it). The terminal keeps running; the view stays where you were. The folder button in the Spaces header turns it off (shared key `spaces.follow`).
 - **Spaces with worktrees.** Colored avatars, repo and branch tails (`↑2 ↓1`), worktrees nested under their repo, machine groups when you use ssh machines.
@@ -35,7 +36,7 @@ genz/
 ├─ mods/
 │  ├─ genz-chrome/   brand row + footer
 │  ├─ genz-spaces/   spaces list
-│  ├─ genz-agents/   agents list + Settled shelf
+│  ├─ genz-agents/   agents list, Terminals group, Settled shelf
 │  ├─ genz-tabs/     tab bar
 │  ├─ projects/      helper: projects, worktrees, new-agent flow, menus, peek
 │  ├─ projects-ui/   helper: the projects mod's dialogs and pickers

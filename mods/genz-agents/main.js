@@ -109,6 +109,48 @@ const sameDir = (a, b) => Boolean(a && b) && a.replace(/[\\/]+$/, "").toLowerCas
 // personal: Claude's own sub-agents (Agent tool), from the files projects/hooks/subagents.sh keeps per terminal.
 const SUBS = () => `${appHome()}/data/projects/subagents`;
 
+// genz: Terminals. Plain terminals (a shell, or any program that isn't an agent) get a group of their own under the
+// agents, so everything that runs is in one list. A row is titled by what tells it apart: the command running in it,
+// else a tab name someone gave, else its folder. Running ones first, then the most recently used; idle ones past
+// TERMS_FIRST fold into "N more".
+// What runs in a shell: other systems report it as the terminal's `foreground`. On Windows the core always reports the
+// shell itself, so shell-procs.cs (compiled once into data/genz-agents/, by csc from .NET Framework) reads the shells'
+// child processes. It is asked every PROBE_FAST ms while the group shows, PROBE_SLOW otherwise; ~50 ms a look.
+const TERMS_FIRST = 5;
+const PROBE_FAST = 5000;
+const PROBE_SLOW = 30000;
+const PROBE_VER = 1; // in the helper's file name: raise it when shell-procs.cs changes, and it is compiled again.
+const CSC = ["C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe", "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe"];
+const leaf = (p) => slash(p).split("/").filter(Boolean).pop() ?? p;
+const quote = (a) => (/\s/.test(a) ? `"${a}"` : a);
+// A Windows command line as words: quotes group, and are dropped.
+function argvOf(line) {
+  const out = [];
+  let cur = "", quoted = false, any = false;
+  for (const c of line) {
+    if (c === '"') { quoted = !quoted; any = true; continue; }
+    if (!quoted && /\s/.test(c)) { if (cur || any) out.push(cur); cur = ""; any = false; continue; }
+    cur += c;
+  }
+  if (cur || any) out.push(cur);
+  return out;
+}
+// A command as a person typed it: `"C:\Program Files\nodejs\node.exe" ...\npm-cli.js run dev` reads "npm run dev",
+// `cmd /c ""C:\...\php.bat" artisan serve"` reads "php artisan serve". Paths lose their folders.
+function commandName(line, exe) {
+  const viaCmd = /^"?[^"]*\bcmd(?:\.exe)?"?\s+(?:.*?\s)?\/[ck]\s+(.+)$/i.exec(line ?? "");
+  let inner = viaCmd ? viaCmd[1].trim() : (line ?? "");
+  if (viaCmd && inner.startsWith('"') && inner.endsWith('"') && inner.slice(1, -1).includes('"')) inner = inner.slice(1, -1);
+  const w = argvOf(inner);
+  const short = (s) => { const b = leaf(s).replace(/\.(exe|com|cmd|bat|ps1)$/i, ""); return b && b === b.toUpperCase() ? b.toLowerCase() : b; };
+  if (!w.length) return short(exe ?? "");
+  let head = short(w[0]), rest = w.slice(1);
+  const tool = /^node$/i.test(head) && rest.length ? /^(npm|npx|pnpm|yarn|bun)(?:-cli)?\.(?:c?js|mjs)$/i.exec(leaf(rest[0])) : null;
+  if (tool) { head = tool[1].toLowerCase(); rest = rest.slice(1); }
+  const isPath = (x) => /^[A-Za-z]:[\\/]/.test(x) || x.startsWith("\\\\") || (x.startsWith("/") && x.indexOf("/", 1) > 0);
+  return [head, ...rest.map((x) => (isPath(x) ? leaf(x) : x))].join(" ").slice(0, 120);
+}
+
 function duration(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
@@ -191,6 +233,18 @@ export default class Agents extends View {
     this.pending = {};
     this.settledOpen = localStorage.getItem("settled-open") === "true";
     this.settledMore = false;
+    // genz: Terminals. procs: terminal -> { cmd, at } for shells running a command (see probe). stamps: terminal ->
+    // { seen, ran }: when it was last looked at and when a command last started or ended in it, kept across restarts.
+    this.procs = new Map();
+    this.stamps = JSON.parse(localStorage.getItem("terms") ?? "{}");
+    this.termsOpen = localStorage.getItem("terms-open") !== "false";
+    this.termsMore = false;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        try { await this.probe(cx); } catch {}
+        await cx.sleep(this.probeGap());
+      }
+    });
     cx.timer.every(30000, (cx) => cx.notify());
     // genz: agents idle for settleDays() days settle themselves; looked at once a minute and at the first render with agents.
     cx.timer.every(60000, (cx) => this.autoSettle(cx));
@@ -274,6 +328,73 @@ export default class Agents extends View {
 
   isFolded(addr, subs) {
     return this.folded.has(addr) || (!this.opened.has(addr) && subs.some((s) => s.t.claude));
+  }
+
+  // genz: Terminals. Often while the group can be seen, seldom otherwise (the stamps still follow commands).
+  probeGap() {
+    const seen = this.termsOpen && listShown() !== "spaces" && !narrow() && window()?.active !== false;
+    return seen ? PROBE_FAST : PROBE_SLOW;
+  }
+
+  // The helper's path, compiled on first use. Null when it can't be built: the list still works, without commands.
+  async helper() {
+    if (this.exe !== undefined) return this.exe;
+    this.exe = null;
+    const win = (p) => p.replace(/\//g, "\\");
+    const dir = `${appHome()}/data/genz-agents`, name = `shell-procs-${PROBE_VER}.exe`;
+    await fs.mkdir(dir, { recursive: true }).catch(() => {});
+    let have = (await fs.readdir(dir).catch(() => [])).includes(name);
+    for (const csc of have ? [] : CSC) {
+      const r = await exec(csc, ["/nologo", "/optimize+", `/out:${win(`${dir}/${name}`)}`, win(`${appHome()}/mods/genz-agents/shell-procs.cs`)], { timeout: 60000 }).catch(() => null);
+      if (r?.code === 0) { have = true; break; }
+    }
+    if (have) this.exe = win(`${dir}/${name}`);
+    return this.exe;
+  }
+
+  // Which local shells run a command now. Redraws only when that changed; a command starting or ending stamps its terminal.
+  async probe(cx) {
+    if (window()?.platform !== "windows") return;
+    const byAddr = new Map(terminals().map((k) => [k.address, k]));
+    const pids = new Map();
+    for (const p of panes()) {
+      const k = p.terminal && !p.terminal.includes("/") && p.program?.shell ? byAddr.get(p.terminal) : null;
+      if (k?.pid && k.state === "live") pids.set(String(k.pid), p.terminal);
+    }
+    const next = new Map();
+    if (pids.size) {
+      const exe = await this.helper();
+      if (!exe) return;
+      const r = await exec(exe, [...pids.keys()]).catch(() => null);
+      if (!r || r.code !== 0) return;
+      for (const line of r.stdout.split("\n")) {
+        const [pid, at, , name, cmd] = line.split("\t");
+        const addr = pids.get(pid);
+        if (addr) next.set(addr, { at: Number(at) || null, cmd: commandName(cmd ?? "", name) });
+      }
+    }
+    const sig = JSON.stringify([...next].sort((x, y) => x[0].localeCompare(y[0])));
+    if (sig === this.procSig) return;
+    const first = this.procSig === undefined, now = Date.now();
+    if (!first) for (const a of new Set([...this.procs.keys(), ...next.keys()])) if (this.procs.has(a) !== next.has(a)) this.stamp(a, "ran", now);
+    this.saveStamps();
+    this.procSig = sig;
+    this.procs = next;
+    cx.notify();
+  }
+
+  stamp(addr, key, at) {
+    (this.stamps[addr] ??= {})[key] = at;
+    this.stampsDirty = true;
+  }
+
+  // Ended terminals are dropped. Only once the core has listed some: right after a start the list is empty.
+  saveStamps() {
+    if (!this.stampsDirty) return;
+    this.stampsDirty = false;
+    const live = new Set(terminals().filter((k) => k.state === "live").map((k) => k.address));
+    if (live.size) for (const k of Object.keys(this.stamps)) if (!live.has(k)) delete this.stamps[k];
+    localStorage.setItem("terms", JSON.stringify(this.stamps));
   }
 
   // Claude's sub-agents under the agent or live terminal running them, shaped like terminals() entries for tree().
@@ -727,7 +848,7 @@ export default class Agents extends View {
       return (sub && sub !== a.program?.name ? sub : null) ?? detail.get(a.address) ?? (label(a) || a.program?.name || a.address);
     };
     // personal: closes the agent's pane, or its space when it's the only pane there. Cards and Settled rows share it.
-    const closer = (a) => div()
+    const closer = (a, tip = "Close agent") => div()
       .id(`close-${a.address}`)
       .flex_none()
       .size(24)
@@ -738,7 +859,7 @@ export default class Agents extends View {
       .text_color(t.dim)
       .cursor_pointer()
       .hover((s) => s.bg(t.blocked + "26").text_color(t.blocked))
-      .tooltip("Close agent")
+      .tooltip(tip)
       .on_click((_e, cx) => {
         cx.stop_propagation();
         const all = spaces();
@@ -968,7 +1089,121 @@ export default class Agents extends View {
     };
     const section = (gs) => gs.flatMap((g) => [header(g), ...body(g)]);
     const split = byPriority && !collapsed;
-    const rows = collapsed ? list.flatMap(withKids) : section(split ? groups.filter((g) => !BOTTOM.has(g.id)) : groups);
+
+    // genz: Terminals (see the notes at TERMS_FIRST). Every pane holding a terminal that isn't an agent, nor a helper an
+    // agent started (those sit under their agent). Looking at one counts when you leave it, so its row doesn't jump to
+    // the top under the pointer.
+    const lookedAt = ps.find((p) => p.focused && p.terminal && !p.program?.agent)?.terminal ?? null;
+    if (this.lookedAt !== lookedAt) {
+      if (this.lookedAt) { this.stamp(this.lookedAt, "seen", now); this.saveStamps(); }
+      this.lookedAt = lookedAt;
+    }
+    const spaceOfTab = new Map(spaces().flatMap((s) => s.tabs.map((tb) => [tb.id, s])));
+    const shells = ps.filter((p) => p.terminal && !p.program?.agent && !term.get(p.terminal)?.parent).map((p) => {
+      const k = term.get(p.terminal), sp = spaceOfTab.get(p.tab), tab = tabs.find((x) => x.id === p.tab);
+      const fg = k?.foreground;
+      // What it runs: a program started as the terminal itself (ssh, a server), the foreground program the core reports
+      // (not on Windows), or what the helper found under the shell.
+      const job = !p.program?.shell ? { cmd: commandName((k?.argv ?? []).map(quote).join(" "), p.program?.name), at: k?.created_ms ?? null }
+        : fg?.pid && k?.pid && fg.pid !== k.pid ? { cmd: commandName((fg.argv ?? []).map(quote).join(" "), fg.name), at: null }
+        : this.procs.get(p.terminal) ?? null;
+      const folder = p.cwd ? dirName(p.cwd) : null;
+      const elsewhere = Boolean(p.cwd && sp?.folder && !p.terminal.includes("/") && !inside(low(p.cwd), low(sp.folder)));
+      const ctx = (elsewhere ? folder : sp?.name) ?? folder ?? "";
+      // A tab's name counts when someone (or its agent, before it left) gave it one and this is the tab's first terminal.
+      const auto = (n) => !n || /^\d+$/.test(n) || /^tb\d+$/.test(n) || n === p.terminal || n === p.program?.name;
+      const named = tab && !auto(tab.name) && lead(tab, ps)?.pane === p.pane ? tab.name : null;
+      const head = job?.cmd || named || folder || p.program?.name || p.terminal;
+      const c = sp && shared("space.colors")?.[sp.id];
+      const stamps = this.stamps[p.terminal] ?? {};
+      return {
+        address: p.terminal, pane: p.pane, space: sp?.id, focused: p.focused, program: p.program, branch: p.branch, job, head, ctx,
+        // Under the title: where it is; a row already titled by its folder says its program instead.
+        under: head === ctx ? (p.program?.name ?? "shell") : ctx,
+        color: elsewhere ? Object.values(MARK)[[...ctx].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % 6]
+          : c ? (c.startsWith("#") ? c : (MARK[c] ?? t[c])) : t.dim,
+        tip: [head, job && named ? named : null, p.cwd].filter(Boolean).join("\n"),
+        at: Math.max(stamps.seen ?? 0, stamps.ran ?? 0, k?.created_ms ?? 0),
+        machine: p.terminal.includes("/") ? p.terminal.split("/")[0] : null,
+      };
+    });
+    // A card like an agent's: the program's icon (a dot on its corner while a command runs), the title with how long
+    // the command has run or since the terminal was last used, then where it is. An idle one closes from its row.
+    const shellRow = (x) => {
+      const hov = this.hovered === x.address;
+      const busy = Boolean(x.job);
+      const cut = x.focused ? t.selected : t.chrome;
+      const tile = div().relative().size(30).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center()
+        .child(icon(x.program, 16, busy ? t.foreground : t.muted) ?? svg("icons/shell.svg").size(16).flex_none().text_color(t.muted))
+        .when(busy, (el) => el.child(div().absolute().right(1).bottom(1).size(11).rounded(6).bg(t.working).border(2).border_color(cut)));
+      const stamp = busy ? (x.job.at ? duration(now - x.job.at) : "") : x.focused || !x.at ? "" : duration(now - x.at);
+      const titleLine = h_flex().h(24).gap(6).items_center()
+        .child(div().id(`tmt-${x.address}`).flex_1().min_w(0).truncate().text_size(13.5)
+          .when(x.focused, (el) => el.font_semibold())
+          .text_color(busy || x.focused ? t.foreground : t.muted).tooltip(x.tip).child(x.head))
+        .child(h_flex().flex_none().gap(2).items_center()
+          .when(hov && !busy, (el) => el.child(closer(x, "Close terminal")))
+          .child(div().flex_none().text_size(11).text_color(busy ? t.working : t.dim).child(stamp)));
+      const meta = h_flex().h(16).gap(6).items_center().text_size(11.5).text_color(t.dim)
+        .child(div().size(8).flex_none().rounded(3).bg(x.color))
+        .child(div().flex_shrink(1).min_w(0).truncate().text_color(t.muted).child(x.under))
+        .when(Boolean(x.machine), (el) => el.child(this.remote(t, x, x.machine)))
+        .when(Boolean(x.branch), (el) => el.child(div().flex_none().text_color(t.dim).child("·")).child(this.branchLine(t, x).flex_1().min_w(0)));
+      return h_flex()
+        .id(`tm-${x.address}`)
+        .relative()
+        .px(8)
+        .py(6)
+        .gap(10)
+        .items_center()
+        .flex_none()
+        .rounded(10)
+        .when(x.focused, (el) => el.bg(t.selected))
+        .when(!x.focused, (el) => el.hover((s) => s.bg(t.hover)))
+        .cursor_pointer()
+        .on_hover((on, cx) => {
+          if (on) this.hovered = x.address;
+          else if (this.hovered === x.address) this.hovered = null;
+          cx.notify();
+        })
+        .on_click(() => run("pane.focus", { pane: x.pane }))
+        .when(x.focused, (el) => el.child(div().absolute().left(0).top(10).bottom(10).w(3).rounded(2).bg(t.accent)))
+        .child(tile)
+        .child(v_flex().flex_1().min_w(0).gap(1).child(titleLine).child(meta));
+    };
+    const busyShells = shells.filter((x) => x.job).sort((x, y) => (y.job.at ?? 0) - (x.job.at ?? 0) || x.address.localeCompare(y.address));
+    const quietShells = shells.filter((x) => !x.job).sort((x, y) => y.at - x.at || x.address.localeCompare(y.address));
+    const someQuiet = this.termsMore ? quietShells : quietShells.filter((x, i) => i < TERMS_FIRST || x.focused);
+    // The switcher (projects-ui, projects.switch) lists the same terminals, in this order: mods share one runtime.
+    // Stamped, so a list left behind by another layout isn't taken for a live one.
+    globalThis.__genzTerminals = { at: now, list: [...busyShells, ...quietShells] };
+    const termsHeader = () => h_flex().id("terms-header").px(10).pt(8).h(32).flex_none().gap(7).items_center().text_size(11.5).font_semibold().cursor_pointer()
+      .hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => {
+        this.termsOpen = !this.termsOpen;
+        localStorage.setItem("terms-open", String(this.termsOpen));
+        cx.notify();
+      })
+      .child(svg("icons/shell.svg").size(12).flex_none().text_color(t.dim))
+      .child(div().text_color(t.muted).child("Terminals"))
+      .child(div().flex_none().px(6).h(16).rounded(8).bg(t.hover).flex().items_center()
+        .text_size(10.5).font_medium().text_color(t.dim).child(String(shells.length)))
+      .when(busyShells.length > 0, (el) => el.child(h_flex().id("terms-busy").flex_none().gap(4).items_center().text_size(10.5).font_medium().text_color(t.working)
+        .tooltip(`${busyShells.length} running a command`)
+        .child(div().size(6).rounded(3).bg(t.working)).child(String(busyShells.length))))
+      .child(div().flex_1())
+      .child(svg(`mods/workspace-chrome/chevron-${this.termsOpen ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim));
+    const termsMoreRow = () => h_flex().id("terms-more").px(8).h(24).flex_none().items_center().text_size(11.5).text_color(t.dim).cursor_pointer()
+      .hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => { this.termsMore = !this.termsMore; cx.notify(); })
+      .child(this.termsMore ? "Show less" : `${quietShells.length - someQuiet.length} more`);
+    const termRows = collapsed || shells.length === 0 ? [] : [
+      termsHeader(),
+      ...(this.termsOpen ? [...busyShells, ...someQuiet].map(shellRow) : []),
+      ...(this.termsOpen && (this.termsMore ? quietShells.length > TERMS_FIRST : quietShells.length > someQuiet.length) ? [termsMoreRow()] : []),
+    ];
+
+    const rows = collapsed ? list.flatMap(withKids) : [...section(split ? groups.filter((g) => !BOTTOM.has(g.id)) : groups), ...termRows];
     const bottom = split ? section(groups.filter((g) => BOTTOM.has(g.id))) : [];
     this.lookup(cx);
 
@@ -1097,7 +1332,7 @@ export default class Agents extends View {
         .text_size(12).font_semibold().text_color(t.muted)
         .child(listSwitch("agents", t, { spaces: spaces().length, blocked: nBlocked, working: nWorking }))
         .child(div().flex_1())
-        .child(headerButton("ag-find", "mods/workspace-chrome/search.svg", "Switch agent (⌃⇧A)", t, () => run("projects.switch")))
+        .child(headerButton("ag-find", "mods/workspace-chrome/search.svg", "Switch agent or terminal (⌃⇧A)", t, () => run("projects.switch")))
         .child(h_flex().gap(1).p(2).mx(2).rounded(7).bg(t.hover).children(SORTS.map((s) => {
           const on = s.id === sort.id;
           return div().id(`seg-${s.id}`).size(20).flex_none().flex().items_center().justify_center().rounded(5)
